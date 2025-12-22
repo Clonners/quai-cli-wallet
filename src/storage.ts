@@ -228,6 +228,49 @@ export async function saveWalletState(wallet: QuaiHDWallet, password: string): P
     fs.writeFileSync(KEYSTORE_FILE, JSON.stringify(storedWallet, null, 2), { mode: 0o600 });
 }
 
+/**
+ * Save wallet state but only include specified addresses (plus existing ones)
+ * Used by scan to avoid storing addresses without balance
+ */
+export async function saveWalletStateWithAddresses(
+    wallet: QuaiHDWallet,
+    password: string,
+    addressesToKeep: Set<string>
+): Promise<void> {
+    if (!walletExists()) {
+        throw new Error('No wallet found');
+    }
+
+    const data = fs.readFileSync(KEYSTORE_FILE, 'utf8');
+    const storedWallet: StoredWallet = JSON.parse(data);
+
+    // Verify password by attempting to decrypt
+    try {
+        decryptMnemonic(
+            storedWallet.encryptedMnemonic,
+            password,
+            storedWallet.salt,
+            storedWallet.iv,
+            storedWallet.authTag
+        );
+    } catch {
+        throw new Error('Incorrect password');
+    }
+
+    // Get existing addresses that were already stored
+    const existingAddresses = new Set(storedWallet.walletData.addresses.map(a => a.address));
+
+    // Serialize wallet and filter addresses
+    const serialized = sanitizeWalletData(wallet.serialize());
+    serialized.addresses = serialized.addresses.filter(
+        addr => existingAddresses.has(addr.address) || addressesToKeep.has(addr.address)
+    );
+
+    storedWallet.walletData = serialized;
+
+    fs.writeFileSync(KEYSTORE_FILE, JSON.stringify(storedWallet, null, 2), { mode: 0o600 });
+}
+
 export function deleteWallet(): void {
     if (fs.existsSync(KEYSTORE_FILE)) {
         fs.unlinkSync(KEYSTORE_FILE);

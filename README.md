@@ -55,7 +55,7 @@ Creates a new HD wallet with a 12-word recovery phrase. **Save this phrase secur
 ```bash
 quai-cli-wallet import
 ```
-Import a wallet from an existing 12-word recovery phrase.
+Import a wallet from an existing recovery phrase (12 or 24 words supported).
 
 #### Delete wallet
 ```bash
@@ -67,7 +67,7 @@ Permanently delete the wallet. Requires double confirmation.
 ```bash
 quai-cli-wallet info
 ```
-Display wallet information including network, address count, and zone distribution.
+Display wallet information including network, address count, zone distribution, and total balance.
 
 ### Address Management
 
@@ -99,6 +99,18 @@ Filter by zone:
 quai-cli-wallet addresses --zone cyprus1
 ```
 
+#### Scan for addresses with balance (wallet recovery)
+```bash
+quai-cli-wallet scan <count> [--zone <zone>]
+```
+Scans the specified number of addresses sequentially and saves any that have a non-zero balance. Useful for recovering a wallet from a seed phrase.
+
+Examples:
+```bash
+quai-cli-wallet scan 100                # Scan 100 addresses in cyprus1
+quai-cli-wallet scan 500 --zone paxos1  # Scan 500 addresses in paxos1
+```
+
 ### Balance Operations
 
 #### Check single address balance
@@ -128,11 +140,7 @@ The command will:
 
 Send maximum balance (minus gas):
 ```bash
-quai-cli-wallet send <from> <to> --max
-# or
 quai-cli-wallet send <from> <to> max
-# or simply omit amount
-quai-cli-wallet send <from> <to>
 ```
 
 With custom gas limit:
@@ -162,7 +170,7 @@ quai-cli-wallet network orchard
 **Available networks:**
 | Network | RPC URL |
 |---------|---------|
-| mainnet | https://rpc.quai.network |
+| mainnet (default) | https://rpc.quai.network |
 | orchard | https://rpc.orchard.quai.network |
 
 ### Key Export
@@ -205,7 +213,7 @@ quai-wallet-data/
   "authTag": "...",
   "walletData": {
     "version": 1,
-    "phrase": "...",
+    "phrase": "",
     "coinType": 994,
     "addresses": [...]
   }
@@ -214,6 +222,7 @@ quai-wallet-data/
 
 **Security notes:**
 - The mnemonic is encrypted with AES-256-GCM; password is required to decrypt
+- The `phrase` field in `walletData` is always empty (mnemonic only stored encrypted)
 - PBKDF2 with 100,000 iterations for key derivation
 - Addresses and public keys are stored in plaintext (not secret)
 - Private keys are derived at runtime from the mnemonic
@@ -270,7 +279,7 @@ quai-cli-wallet balance 0x00...
 quai-cli-wallet send 0x00... 0x00... 1.5
 
 # Send max balance
-quai-cli-wallet send 0x00... 0x00... --max
+quai-cli-wallet send 0x00... 0x00... max
 
 # Check total across all addresses
 quai-cli-wallet total-balance

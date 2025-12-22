@@ -11,10 +11,10 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "package": "npm run build && pkg . --out-path bin",
-    "package:mac": "npm run build && pkg . --targets node18-macos-arm64 --out-path bin",
-    "package:linux": "npm run build && pkg . --targets node18-linux-x64 --out-path bin",
-    "package:win": "npm run build && pkg . --targets node18-win-x64 --out-path bin",
-    "package:all": "npm run build && pkg . --targets node18-macos-arm64,node18-linux-x64,node18-win-x64 --out-path bin"
+    "package:mac": "npm run build && pkg . --targets node18-macos-arm64 --output bin/quai-cli-wallet-macos-arm64",
+    "package:linux": "npm run build && pkg . --targets node18-linux-x64 --output bin/quai-cli-wallet-linux-x64",
+    "package:win": "npm run build && pkg . --targets node18-win-x64 --output bin/quai-cli-wallet-win-x64.exe",
+    "package:all": "npm run build && pkg . --targets node18-macos-arm64 --output bin/quai-cli-wallet-macos-arm64 && pkg . --targets node18-linux-x64 --output bin/quai-cli-wallet-linux-x64 && pkg . --targets node18-win-x64 --output bin/quai-cli-wallet-win-x64.exe"
   },
   "pkg": {
     "assets": [],

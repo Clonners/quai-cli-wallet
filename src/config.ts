@@ -16,7 +16,7 @@ export const NETWORKS: Record<string, NetworkConfig> = {
     },
 };
 
-export const DEFAULT_NETWORK = 'orchard';
+export const DEFAULT_NETWORK = 'mainnet';
 
 // Use QUAI_WALLET_DIR env var, or current working directory + quai-wallet-data
 // This allows the binary to work when packaged (can't write to __dirname in pkg snapshot)

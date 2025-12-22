@@ -8,7 +8,7 @@ import {
     type TransactionResponse,
 } from 'quais';
 import { NETWORKS, type NetworkConfig } from './config';
-import { loadConfig, saveConfig, loadWallet, saveWalletState, type WalletConfig } from './storage';
+import { loadConfig, saveConfig, loadWallet, saveWalletState, saveWalletStateWithAddresses, type WalletConfig } from './storage';
 
 // Transaction request interface for Quai
 interface QuaiTxRequest {
@@ -269,5 +269,66 @@ export class WalletService {
     setCurrentAddress(address: string): void {
         this.config.currentAddress = address;
         saveConfig(this.config);
+    }
+
+    /**
+     * Scan for addresses with balance (useful for wallet recovery)
+     * Generates addresses sequentially and checks their balance
+     * Only stores addresses that have a non-zero balance
+     */
+    async scanAddresses(
+        count: number,
+        zone: Zone,
+        onProgress?: (current: number, total: number, address: string, hasBalance: boolean) => void
+    ): Promise<Array<{ address: string; zone: Zone; balance: string; balanceWei: bigint }>> {
+        if (!this.wallet || !this.provider) {
+            throw new Error('Wallet not initialized');
+        }
+
+        const foundAddresses: Array<{ address: string; zone: Zone; balance: string; balanceWei: bigint }> = [];
+
+        // Get existing addresses to avoid re-checking them
+        const existingAddresses = new Set(this.getAddresses().map(a => a.address));
+
+        for (let i = 0; i < count; i++) {
+            // Generate next address for the zone
+            const addressInfo = await this.wallet.getNextAddress(0, zone);
+
+            // Skip if already in wallet
+            if (existingAddresses.has(addressInfo.address)) {
+                continue;
+            }
+
+            // Check balance
+            const balanceWei = await this.provider.getBalance(addressInfo.address);
+            const hasBalance = balanceWei > 0n;
+
+            if (onProgress) {
+                onProgress(i + 1, count, addressInfo.address, hasBalance);
+            }
+
+            if (hasBalance) {
+                foundAddresses.push({
+                    address: addressInfo.address,
+                    zone: addressInfo.zone,
+                    balance: formatQuai(balanceWei),
+                    balanceWei,
+                });
+            }
+        }
+
+        // Save wallet state - only include addresses with balance (plus existing ones)
+        if (foundAddresses.length > 0) {
+            const addressSet = new Set(foundAddresses.map(a => a.address));
+            await saveWalletStateWithAddresses(this.wallet, this.password, addressSet);
+
+            // Set the first found address as current if none set
+            if (!this.config.currentAddress) {
+                this.config.currentAddress = foundAddresses[0].address;
+                saveConfig(this.config);
+            }
+        }
+
+        return foundAddresses;
     }
 }

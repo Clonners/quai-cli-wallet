@@ -178,7 +178,7 @@ program
             });
 
             const phrase = await new Promise<string>((resolve) => {
-                rl.question('Enter recovery phrase (12 words): ', (answer) => {
+                rl.question('Enter recovery phrase (12 or 24 words): ', (answer) => {
                     rl.close();
                     resolve(answer.trim());
                 });
@@ -261,6 +261,66 @@ program
             console.log(`Total: ${addresses.length} address(es)`);
         } catch (error) {
             console.error('Error:', (error as Error).message);
+            process.exit(1);
+        }
+    });
+
+// Scan for addresses with balance (wallet recovery)
+program
+    .command('scan')
+    .description('Scan for addresses with balance (useful for wallet recovery)')
+    .argument('<count>', 'Number of addresses to scan')
+    .option('--zone <zone>', 'Zone to scan (default: cyprus1)', 'cyprus1')
+    .action(async (countStr: string, options) => {
+        try {
+            const count = parseInt(countStr, 10);
+            if (isNaN(count) || count < 1) {
+                console.error('Count must be a positive integer');
+                process.exit(1);
+            }
+
+            if (count > 10000) {
+                console.error('Count cannot exceed 10000');
+                process.exit(1);
+            }
+
+            const zone = parseZone(options.zone);
+            const password = await promptPassword();
+
+            const service = new WalletService();
+            await service.initialize(password);
+
+            console.log(`\nScanning ${count} addresses for ${options.zone}...`);
+            console.log(`Network: ${service.currentNetwork.name}\n`);
+
+            const foundAddresses = await service.scanAddresses(count, zone, (current, total, address, hasBalance) => {
+                const status = hasBalance ? '✓ FOUND' : '  -';
+                process.stdout.write(`\r[${current}/${total}] ${address} ${status}`.padEnd(80));
+                if (hasBalance) {
+                    process.stdout.write('\n');
+                }
+            });
+
+            // Clear the progress line
+            process.stdout.write('\r' + ' '.repeat(80) + '\r');
+
+            console.log('\n' + '='.repeat(60));
+            if (foundAddresses.length === 0) {
+                console.log('No addresses with balance found.');
+            } else {
+                console.log(`Found ${foundAddresses.length} address(es) with balance:\n`);
+                let total = 0n;
+                for (const addr of foundAddresses) {
+                    console.log(`  ${addr.address}`);
+                    console.log(`    Balance: ${addr.balance} QUAI\n`);
+                    total += addr.balanceWei;
+                }
+                console.log('-'.repeat(60));
+                console.log(`Total balance found: ${formatQuai(total)} QUAI`);
+                console.log('\nAddresses with balance have been saved to your wallet.');
+            }
+        } catch (error) {
+            console.error('\nError:', (error as Error).message);
             process.exit(1);
         }
     });
@@ -352,10 +412,9 @@ program
     .description('Send QUAI to an address')
     .argument('<from>', 'Sender address')
     .argument('<to>', 'Recipient address')
-    .argument('[amount]', 'Amount in QUAI (omit or use "max" to send full balance minus gas)')
+    .argument('<amount>', 'Amount in QUAI (use "max" to send full balance minus gas)')
     .option('--gas-limit <limit>', 'Gas limit')
-    .option('--max', 'Send maximum amount (full balance minus gas fees)')
-    .action(async (from: string, to: string, amount: string | undefined, options) => {
+    .action(async (from: string, to: string, amount: string, options) => {
         try {
             const password = await promptPassword();
 
@@ -383,8 +442,8 @@ program
             let sendAmount: string;
             let sendAmountWei: bigint;
 
-            // Calculate max amount if --max flag or amount is "max" or not provided
-            if (options.max || amount === 'max' || !amount) {
+            // Calculate max amount if amount is "max"
+            if (amount.toLowerCase() === 'max') {
                 if (balance.balanceWei <= gasCost) {
                     console.error('\nInsufficient balance to cover gas fees');
                     process.exit(1);
@@ -594,6 +653,25 @@ program
                 for (const [zone, count] of Object.entries(byZone)) {
                     console.log(`  ${zone}: ${count}`);
                 }
+
+                // Fetch total balance
+                console.log('\nFetching balances...');
+                let totalAvailable = 0n;
+                let totalLocked = 0n;
+
+                for (const addr of addresses) {
+                    const balances = await service.getTotalBalance(addr.address);
+                    totalAvailable += balances.availableWei;
+                    totalLocked += balances.lockedWei;
+                }
+
+                const grandTotal = totalAvailable + totalLocked;
+                console.log('\nTotal Balance:');
+                console.log(`  Available: ${formatQuai(totalAvailable)} QUAI`);
+                if (totalLocked > 0n) {
+                    console.log(`  Locked:    ${formatQuai(totalLocked)} QUAI`);
+                }
+                console.log(`  Total:     ${formatQuai(grandTotal)} QUAI`);
             }
         } catch (error) {
             console.error('Error:', (error as Error).message);
