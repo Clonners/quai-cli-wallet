@@ -75,7 +75,7 @@ Edit `config/dex.json`:
 
 The CLI uses a 3-step gas estimation strategy matching MetaMask:
 
-1. **First attempt** — `eth_estimateGas`
+1. **First attempt** — `quai_estimateGas`
 2. **Re-estimate** — If transient failure (timeout, network error), retries once after 2s
 3. **Fallback** — If both fail or estimate exceeds cap, uses `DEFAULT_GAS_LIMIT`
 

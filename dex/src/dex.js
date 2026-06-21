@@ -232,6 +232,13 @@ async function retryWithBackoff(fn, context, label, maxAttempts = RETRY_MAX_ATTE
 
 // ─── ABIs ────────────────────────────────────────────────────────────────────
 
+// ─── ABIs ────────────────────────────────────────────────────────────────────
+//
+// ROUTER_V2: Standard UniswapV2-compatible router ABI.
+// Function names like swapExactETHForTokens/swapTokensForExactETH are part of the
+// UniswapV2 standard interface. On Quai Network, these functions use native QUAI
+// (the native asset), not Wrapped QUAI (WQUAI). The router wraps/unwraps internally.
+
 const ERC20 = [
   'function balanceOf(address) view returns (uint256)',
   'function transfer(address,uint256) returns (bool)',
@@ -248,6 +255,8 @@ const ROUTER_V2 = [
   'function getAmountsIn(uint256,address[]) view returns (uint256[])',
   'function swapExactTokensForTokens(uint256,uint256,address[],address,uint256) returns (uint256[])',
   'function swapTokensForExactTokens(uint256,uint256,address[],address,uint256) returns (uint256[])',
+  // Note: swapExactETHForTokens/swapTokensForExactETH are standard UniswapV2 names.
+  // On Quai, 'ETH' refers to native QUAI (the chain's native asset).
   'function swapExactETHForTokens(uint256,address[],address,uint256) payable returns (uint256[])',
   'function swapTokensForExactETH(uint256,uint256,address[],address,uint256) returns (uint256[])',
 ];
@@ -346,7 +355,7 @@ class Client {
   // ── Dynamic gas estimation (MetaMask-style) ──────────────────────────────
   //
   // Strategy (matches MetaMask):
-  //   1. eth_estimateGas
+  //   1. quai_estimateGas
   //   2. If transient failure → re-estimate once after delay
   //   3. If estimate exceeds block gas limit → warn, cap it
   //   4. If all fails → fallback to DEFAULT_GAS_LIMIT
