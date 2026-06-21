@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Generic DEX CLI — Native + ERC20 + Router operations on Quai Network
+ * Generic DEX CLI — Multi-DEX support for Quai Network
  *
- * Works with:
- *   - Native QUAI (balance, transfer, swap in/out)
- *   - Any ERC20 token (balance, transfer, approve, allowance, info)
- *   - Any UniswapV2-compatible router (QuaiSwap, etc.)
+ * Supports:
+ *   - UniswapV2-compatible routers (getAmountsOut, swapExactTokensForTokens, etc.)
+ *   - UniswapV3-compatible routers (quoteExactInputSingle, exactInputSingle, etc.)
+ *   - Custom DEX routers via config
  *
- * Config: cli/qdex/config/dex.json
+ * Config: dex/config/dex.json
  *
  * Usage: node dex.js <command> [subcommand] [args]
  */
@@ -44,6 +44,75 @@ const clr = {
   gray: (s) => c('90', s),
 };
 
+// ─── Builtin ABIs ────────────────────────────────────────────────────────────
+//
+// Each DEX type has:
+//   - name: human-readable name
+//   - abi: array of function signatures
+//   - swapPatterns: mapping of swap type → method config
+
+const BUILTIN_ABIS = {
+  'v2': {
+    name: 'UniswapV2-compatible',
+    abi: [
+      'function getAmountsOut(uint256,address[]) view returns (uint256[])',
+      'function getAmountsIn(uint256,address[]) view returns (uint256[])',
+      'function swapExactTokensForTokens(uint256,uint256,address[],address,uint256) returns (uint256[])',
+      'function swapTokensForExactTokens(uint256,uint256,address[],address,uint256) returns (uint256[])',
+      // Note: swapExactETHForTokens/swapTokensForExactETH are standard UniswapV2 names.
+      // On Quai, 'ETH' refers to native QUAI (the chain's native asset).
+      'function swapExactETHForTokens(uint256,address[],address,uint256) payable returns (uint256[])',
+      'function swapTokensForExactETH(uint256,uint256,address[],address,uint256) returns (uint256[])',
+    ],
+    swapPatterns: {
+      'token-to-token': {
+        method: 'swapExactTokensForTokens',
+        args: ['amountIn', 'amountOutMin', 'path', 'to', 'deadline'],
+        quoteMethod: 'getAmountsOut',
+        quoteArgs: ['amountIn', 'path']
+      },
+      'native-to-token': {
+        method: 'swapExactETHForTokens',
+        args: ['amountOutMin', 'path', 'to', 'deadline'],
+        value: 'amountIn',
+        quoteMethod: 'getAmountsOut',
+        quoteArgs: ['amountIn', 'path']
+      },
+      'token-to-native': {
+        method: 'swapTokensForExactETH',
+        args: ['amountOut', 'amountInMax', 'path', 'to', 'deadline'],
+        quoteMethod: 'getAmountsIn',
+        quoteArgs: ['amountOut', 'path']
+      }
+    }
+  },
+  'v3': {
+    name: 'UniswapV3-compatible',
+    abi: [
+      // Quote methods
+      'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) view returns (uint256 amountOut)',
+      'function quoteExactOutputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountOut, uint160 sqrtPriceLimitX96) view returns (uint256 amountIn)',
+      // Swap methods
+      'function exactInputSingle(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) payable returns (uint256 amountOut)',
+      'function exactOutputSingle(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountOut, uint256 amountInMaximum, uint160 sqrtPriceLimitX96) payable returns (uint256 amountIn)',
+    ],
+    swapPatterns: {
+      'exact-input': {
+        method: 'exactInputSingle',
+        args: ['tokenIn', 'tokenOut', 'fee', 'recipient', 'deadline', 'amountIn', 'amountOutMinimum', 'sqrtPriceLimitX96'],
+        quoteMethod: 'quoteExactInputSingle',
+        quoteArgs: ['tokenIn', 'tokenOut', 'fee', 'amountIn', 'sqrtPriceLimitX96']
+      },
+      'exact-output': {
+        method: 'exactOutputSingle',
+        args: ['tokenIn', 'tokenOut', 'fee', 'recipient', 'deadline', 'amountOut', 'amountInMaximum', 'sqrtPriceLimitX96'],
+        quoteMethod: 'quoteExactOutputSingle',
+        quoteArgs: ['tokenIn', 'tokenOut', 'fee', 'amountOut', 'sqrtPriceLimitX96']
+      }
+    }
+  }
+};
+
 // ─── Config validation ──────────────────────────────────────────────────────
 
 function validateConfig(raw) {
@@ -73,7 +142,10 @@ function validateConfig(raw) {
         errors.push(`Router "${key}": invalid address`);
       }
       if (!info.type) {
-        errors.push(`Router "${key}": missing type`);
+        errors.push(`Router "${key}": missing type (use "v2", "v3", or "custom")`);
+      }
+      if (info.type === 'v3' && !info.feeTiers) {
+        errors.push(`Router "${key}": V3 routers require "feeTiers" array`);
       }
     }
   }
@@ -114,6 +186,7 @@ function parseGlobalFlags(argv) {
   let configPath = null;
   let showVersion = false;
   let gasBuffer = null;
+  let feeTier = null;
 
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
@@ -150,10 +223,26 @@ function parseGlobalFlags(argv) {
       continue;
     }
 
+    if (arg === '--fee') {
+      feeTier = parseInt(argv[++i]);
+      if (isNaN(feeTier)) {
+        throw new Error(`--fee must be a number, got: ${feeTier}`);
+      }
+      continue;
+    }
+
+    if (arg.startsWith('--fee=')) {
+      feeTier = parseInt(arg.slice('--fee='.length));
+      if (isNaN(feeTier)) {
+        throw new Error(`--fee must be a number, got: ${feeTier}`);
+      }
+      continue;
+    }
+
     cleaned.push(arg);
   }
 
-  return { configPath, showVersion, gasBuffer, cleaned };
+  return { configPath, showVersion, gasBuffer, feeTier, cleaned };
 }
 
 const globalFlags = parseGlobalFlags(process.argv);
@@ -232,13 +321,6 @@ async function retryWithBackoff(fn, context, label, maxAttempts = RETRY_MAX_ATTE
 
 // ─── ABIs ────────────────────────────────────────────────────────────────────
 
-// ─── ABIs ────────────────────────────────────────────────────────────────────
-//
-// ROUTER_V2: Standard UniswapV2-compatible router ABI.
-// Function names like swapExactETHForTokens/swapTokensForExactETH are part of the
-// UniswapV2 standard interface. On Quai Network, these functions use native QUAI
-// (the native asset), not Wrapped QUAI (WQUAI). The router wraps/unwraps internally.
-
 const ERC20 = [
   'function balanceOf(address) view returns (uint256)',
   'function transfer(address,uint256) returns (bool)',
@@ -248,17 +330,6 @@ const ERC20 = [
   'function symbol() view returns (string)',
   'function name() view returns (string)',
   'function totalSupply() view returns (uint256)',
-];
-
-const ROUTER_V2 = [
-  'function getAmountsOut(uint256,address[]) view returns (uint256[])',
-  'function getAmountsIn(uint256,address[]) view returns (uint256[])',
-  'function swapExactTokensForTokens(uint256,uint256,address[],address,uint256) returns (uint256[])',
-  'function swapTokensForExactTokens(uint256,uint256,address[],address,uint256) returns (uint256[])',
-  // Note: swapExactETHForTokens/swapTokensForExactETH are standard UniswapV2 names.
-  // On Quai, 'ETH' refers to native QUAI (the chain's native asset).
-  'function swapExactETHForTokens(uint256,address[],address,uint256) payable returns (uint256[])',
-  'function swapTokensForExactETH(uint256,uint256,address[],address,uint256) returns (uint256[])',
 ];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -310,6 +381,31 @@ function printTx(tx, receipt) {
   if (link) console.log(clr.dim(`   Explorer: ${clr.cyan(link)}`));
 }
 
+// ─── DEX Resolver ────────────────────────────────────────────────────────────
+//
+// Resolves a DEX config to a usable ABI + swap methods based on type.
+
+function resolveDexConfig(routerKey) {
+  const router = resolveRouter(routerKey);
+  
+  // Get builtin config based on type
+  const builtinType = router.type.split('-')[0]; // "v2", "v3", "custom"
+  const builtin = BUILTIN_ABIS[builtinType];
+  
+  if (!builtin) {
+    throw new Error(`Unknown DEX type: ${router.type}. Supported: ${Object.keys(BUILTIN_ABIS).join(', ')}`);
+  }
+  
+  return {
+    address: router.address,
+    type: router.type,
+    name: builtin.name,
+    abi: builtin.abi,
+    swapPatterns: builtin.swapPatterns,
+    feeTiers: router.feeTiers || builtin.feeTiers || [500, 3000, 10000]
+  };
+}
+
 // ─── Client ──────────────────────────────────────────────────────────────────
 
 class Client {
@@ -333,8 +429,12 @@ class Client {
     return new Contract(tokenAddr, ERC20, signer || this.provider);
   }
 
-  router(routerAddr, signer = null) {
-    return new Contract(routerAddr, ROUTER_V2, signer || this.provider);
+  dex(routerKey, signer = null) {
+    const dexConfig = resolveDexConfig(routerKey);
+    return {
+      contract: new Contract(dexConfig.address, dexConfig.abi, signer || this.provider),
+      config: dexConfig
+    };
   }
 
   // ── Network detection ─────────────────────────────────────────────────────
@@ -571,324 +671,195 @@ class Client {
     console.log();
   }
 
-  // ── Router operations ─────────────────────────────────────────────────────
+  // ── Generic DEX operations ────────────────────────────────────────────────
 
-  _detectNativeInPath(path) {
-    const result = [];
-    for (const p of path) {
-      const upper = p.toUpperCase();
-      const token = resolveToken(p);
-      const isNative = !!token.nativeAlias && token.nativeAlias.toUpperCase() === upper;
-      result.push({ ...token, isNative });
+  async dexQuote(routerKey, path, amount, feeTier = null) {
+    const { contract, config: dexConfig } = this.dex(routerKey);
+    
+    // Resolve tokens in path
+    const resolvedPath = path.split(',').map(p => p.trim());
+    const tokenIn = resolveToken(resolvedPath[0]);
+    const tokenOut = resolveToken(resolvedPath[1]);
+    
+    const amountIn = parseAmt(amount, tokenIn.decimals ?? 18);
+    
+    // Determine quote method based on DEX type
+    if (dexConfig.type.startsWith('v2')) {
+      // V2 uses getAmountsOut with [tokenIn, tokenOut] path
+      const path = [tokenIn.address, tokenOut.address];
+      
+      const amounts = await this._retryView(
+        () => contract.getAmountsOut(amountIn, path),
+        'V2 quote'
+      );
+      
+      const amountOut = amounts[amounts.length - 1];
+      console.log(clr.bold(`\n💱 Quote (${clr.cyan(dexConfig.name)}):\n`));
+      console.log(clr.dim(`   In:  ${formatAmt(amountIn, tokenIn.decimals ?? 18)} ${clr.bold(tokenIn.symbol || resolvedPath[0])}`));
+      console.log(clr.dim(`   Out: ${formatAmt(amountOut, tokenOut.decimals ?? 18)} ${clr.bold(tokenOut.symbol || resolvedPath[1])}`));
+      console.log(clr.dim(`   Path: ${resolvedPath.join(' → ')}`));
+      
+      return { amountIn, amountOut, path, fee: null };
+    } 
+    else if (dexConfig.type.startsWith('v3')) {
+      // V3 uses quoteExactInputSingle with fee tier
+      const fee = feeTier || globalFlags.feeTier || dexConfig.feeTiers[1] || 3000;
+      
+      const amountOut = await this._retryView(
+        () => contract.quoteExactInputSingle(
+          tokenIn.address,
+          tokenOut.address,
+          fee,
+          amountIn,
+          0 // sqrtPriceLimitX96 = 0 means no limit
+        ),
+        'V3 quote'
+      );
+      
+      console.log(clr.bold(`\n💱 Quote (${clr.cyan(dexConfig.name)}):\n`));
+      console.log(clr.dim(`   In:  ${formatAmt(amountIn, tokenIn.decimals ?? 18)} ${clr.bold(tokenIn.symbol || resolvedPath[0])}`));
+      console.log(clr.dim(`   Out: ${formatAmt(amountOut, tokenOut.decimals ?? 18)} ${clr.bold(tokenOut.symbol || resolvedPath[1])}`));
+      console.log(clr.dim(`   Fee tier: ${fee / 10000}%`));
+      console.log(clr.dim(`   Path: ${resolvedPath.join(' → ')}`));
+      
+      return { amountIn, amountOut, path: [tokenIn.address, tokenOut.address], fee };
     }
-    return result;
+    
+    throw new Error(`Unsupported DEX type: ${dexConfig.type}`);
   }
 
-  async routerQuote(routerRef, pathStr, amount) {
-    const router = resolveRouter(routerRef);
-    const path = pathStr.split(',').map(s => s.trim());
-    const resolved = this._detectNativeInPath(path);
-
-    const firstNative = resolved[0].isNative;
-    const lastNative = resolved[resolved.length - 1].isNative;
-
-    if (firstNative && lastNative) {
-      throw new Error('Cannot swap native → native directly. Use token → token path.');
-    }
-
-    if (firstNative) return this._nativeInQuote(router.address, resolved, amount);
-    if (lastNative) return this._nativeOutQuote(router.address, resolved, amount);
-
-    const addresses = resolved.map(t => t.address);
-    const decimals = resolved[0].decimals;
-    const valueIn = parseAmt(amount, decimals);
-    const amounts = await this._retryView(
-      () => this.router(router.address).getAmountsOut(valueIn, addresses),
-      'Router quote'
-    );
-    const outDecimals = resolved[resolved.length - 1].decimals;
-    console.log(clr.magenta(`💱 ${clr.bold(amount)} ${path[0]} → ${clr.green(formatAmt(amounts[amounts.length - 1], outDecimals))} ${path[path.length - 1]}`));
-    return amounts;
-  }
-
-  async _nativeInQuote(routerAddr, resolved, amount) {
-    const wAddress = resolved[0].address;
-    const path = [wAddress, ...resolved.slice(1).map(t => t.address)];
-    const valueIn = parseQuai(amount.toString());
-    const amounts = await this._retryView(
-      () => this.router(routerAddr).getAmountsOut(valueIn, path),
-      'Native-in quote'
-    );
-    const outDecimals = resolved[resolved.length - 1].decimals;
-    console.log(clr.magenta(`💱 ${clr.bold(amount)} QUAI → ${clr.green(formatAmt(amounts[amounts.length - 1], outDecimals))} ${resolved[resolved.length - 1].symbol}`));
-    return amounts;
-  }
-
-  async _nativeOutQuote(routerAddr, resolved, amount) {
-    const wAddress = resolved[resolved.length - 1].address;
-    const path = [...resolved.slice(0, -1).map(t => t.address), wAddress];
-    const decimals = resolved[0].decimals;
-    const valueIn = parseAmt(amount, decimals);
-    const amounts = await this._retryView(
-      () => this.router(routerAddr).getAmountsOut(valueIn, path),
-      'Native-out quote'
-    );
-    console.log(clr.magenta(`💱 ${clr.bold(amount)} ${resolved[0].symbol} → ${clr.green(formatQuai(amounts[amounts.length - 1]))} QUAI`));
-    return amounts;
-  }
-
-  async routerSwap(routerRef, pathStr, amount, minOutStr = null, deadlineSec = DEFAULT_DEADLINE_SEC, gasLimit = DEFAULT_GAS_LIMIT, dryRun = false, slippage = DEFAULT_SLIPPAGE) {
-    const router = resolveRouter(routerRef);
-    const path = pathStr.split(',').map(s => s.trim());
-    const resolved = this._detectNativeInPath(path);
-
-    const firstNative = resolved[0].isNative;
-    const lastNative = resolved[resolved.length - 1].isNative;
-
-    if (firstNative && lastNative) {
-      throw new Error('Cannot swap native → native directly. Use token → token path.');
-    }
-
-    if (firstNative) {
-      return this._nativeInSwap(router.address, resolved, amount, minOutStr, deadlineSec, gasLimit, dryRun, slippage);
-    }
-    if (lastNative) {
-      return this._nativeOutSwap(router.address, resolved, amount, minOutStr, deadlineSec, gasLimit, dryRun, slippage);
-    }
-    return this._tokenSwap(router.address, resolved, amount, minOutStr, deadlineSec, gasLimit, dryRun, slippage);
-  }
-
-  async _tokenSwap(routerAddr, resolved, amount, minOutStr, deadlineSec, gasLimit, dryRun, slippage = DEFAULT_SLIPPAGE) {
-    const addresses = resolved.map(t => t.address);
-    const decimals = resolved[0].decimals;
-    const valueIn = parseAmt(amount, decimals);
-
-    const allowance = await this._retryView(
-      () => this.erc20(addresses[0]).allowance(this.addr, routerAddr),
-      'Allowance check'
-    );
-    if (allowance < valueIn) {
+  async dexSwap(routerKey, path, amount, feeTier = null, dryRun = false) {
+    const { contract, config: dexConfig } = this.dex(routerKey);
+    
+    // Resolve tokens in path
+    const resolvedPath = path.split(',').map(p => p.trim());
+    const tokenIn = resolveToken(resolvedPath[0]);
+    const tokenOut = resolveToken(resolvedPath[1]);
+    
+    const amountIn = parseAmt(amount, tokenIn.decimals ?? 18);
+    const deadline = Math.floor(Date.now() / 1000) + (globalFlags.deadlineSec || DEFAULT_DEADLINE_SEC);
+    
+    // Determine swap method based on DEX type
+    if (dexConfig.type.startsWith('v2')) {
+      // V2 swap
+      const swapPattern = dexConfig.swapPatterns['token-to-token'];
+      const amounts = await this._retryView(
+        () => contract.getAmountsOut(amountIn, [tokenIn.address, tokenOut.address]),
+        'V2 quote'
+      );
+      
+      const amountOutMin = amounts[amounts.length - 1];
+      const slippage = globalFlags.slippage ?? DEFAULT_SLIPPAGE;
+      const minAmountOut = (Number(amountOutMin) * (1 - slippage)).toFixed(0);
+      
       if (dryRun) {
-        console.log(clr.yellow(`⚠️  Insufficient allowance. Would approve ${amount}.`));
-      } else {
-        console.log(clr.yellow(`⚠️  Insufficient allowance. Approving...`));
-        await this.tokenApprove(addresses[0], routerAddr, amount);
+        console.log(clr.yellow('\n⚠️  DRY RUN MODE — not executing swap'));
+        console.log(clr.dim(`   Would swap: ${formatAmt(amountIn, tokenIn.decimals ?? 18)} ${tokenIn.symbol || resolvedPath[0]}`));
+        console.log(clr.dim(`   For: ${formatAmt(amountOutMin, tokenOut.decimals ?? 18)} ${tokenOut.symbol || resolvedPath[1]}`));
+        console.log(clr.dim(`   Min out: ${minAmountOut} ${tokenOut.symbol || resolvedPath[1]}`));
+        return null;
       }
+      
+      console.log(clr.cyan(`\n🔄 Swapping ${clr.bold(formatAmt(amountIn, tokenIn.decimals ?? 18))} ${tokenIn.symbol || resolvedPath[0]} → ${tokenOut.symbol || resolvedPath[1]}`));
+      
+      // Approve if needed
+      await this._retryWrite(
+        () => this.erc20(tokenIn.address, this.wallet).approve(dexConfig.address, amountIn, { from: this.addr }),
+        'Token approve'
+      );
+      
+      const txParams = { from: this.addr, to: dexConfig.address };
+      const gasLimit = await this.estimateGas(txParams);
+      
+      const tx = await this._retryWrite(
+        () => contract.swapExactTokensForTokens(
+          amountIn,
+          BigInt(minAmountOut),
+          [tokenIn.address, tokenOut.address],
+          this.addr,
+          deadline,
+          { from: this.addr, gasLimit }
+        ),
+        'V2 swap'
+      );
+      
+      const receipt = await tx.wait(1);
+      console.log(clr.green('✅ Success'));
+      printTx(tx, receipt);
+      return receipt;
     }
-
-    const amounts = await this._retryView(
-      () => this.router(routerAddr).getAmountsOut(valueIn, addresses),
-      'Router quote'
-    );
-    const minOut = minOutStr
-      ? parseAmt(minOutStr, resolved[resolved.length - 1].decimals)
-      : (amounts[amounts.length - 1] * BigInt(10000 - Math.round(slippage * 10000))) / 10000n;
-
-    const outDecimals = resolved[resolved.length - 1].decimals;
-    console.log(clr.cyan(`🔄 Swap ${clr.bold(amount)} ${resolved[0].symbol} → min ${formatAmt(minOut, outDecimals)} ${resolved[resolved.length - 1].symbol}`));
-    console.log(clr.dim(`   (${clr.yellow(slippage * 100 + '% slippage')})`));
-    console.log(clr.dim(`   Path: ${addresses.map(a => clr.cyan(a.slice(0, 10))).join(clr.dim(' → '))}`));
-
-    if (dryRun) {
-      const txParams = { from: this.addr, to: routerAddr, data: this.router(routerAddr, this.wallet).interface.encodeFunctionData('swapExactTokensForTokens', [
-        valueIn, minOut, addresses, this.addr, Math.floor(Date.now() / 1000) + deadlineSec,
-      ]) };
-      const estimatedGas = await this.estimateGas(txParams);
-      console.log(clr.yellow(`   [DRY RUN] Would execute swap with estimated gas ${estimatedGas.toString()}`));
-      return null;
-    }
-
-    const deadline = Math.floor(Date.now() / 1000) + deadlineSec;
-    const txParams = { from: this.addr, to: routerAddr, data: this.router(routerAddr, this.wallet).interface.encodeFunctionData('swapExactTokensForTokens', [
-      valueIn, minOut, addresses, this.addr, deadline,
-    ]) };
-    const finalGasLimit = await this.estimateGas(txParams);
-
-    const tx = await this._retryWrite(
-      () => this.router(routerAddr, this.wallet).swapExactTokensForTokens(
-        valueIn, minOut, addresses, this.addr, deadline, { from: this.addr, gasLimit: finalGasLimit },
-      ),
-      'Token swap'
-    );
-    const receipt = await tx.wait(1);
-    console.log(clr.green('✅ Success'));
-    printTx(tx, receipt);
-    return receipt;
-  }
-
-  async _nativeInSwap(routerAddr, resolved, amount, minOutStr, deadlineSec, gasLimit, dryRun, slippage = DEFAULT_SLIPPAGE) {
-    const wAddress = resolved[0].address;
-    const addresses = [wAddress, ...resolved.slice(1).map(t => t.address)];
-    const valueIn = parseQuai(amount.toString());
-
-    const amounts = await this._retryView(
-      () => this.router(routerAddr).getAmountsOut(valueIn, addresses),
-      'Native-in quote'
-    );
-    const minOut = minOutStr
-      ? parseAmt(minOutStr, resolved[resolved.length - 1].decimals)
-      : (amounts[amounts.length - 1] * BigInt(10000 - Math.round(slippage * 10000))) / 10000n;
-
-    const outDecimals = resolved[resolved.length - 1].decimals;
-    console.log(clr.cyan(`🔄 Swap ${clr.bold(amount)} QUAI → min ${formatAmt(minOut, outDecimals)} ${resolved[resolved.length - 1].symbol}`));
-    console.log(clr.dim(`   (${clr.yellow(slippage * 100 + '% slippage')})`));
-    console.log(clr.dim(`   Path: ${clr.cyan('QUAI')} → ${addresses.slice(1).map(a => clr.cyan(a.slice(0, 10))).join(clr.dim(' → '))}`));
-
-    if (dryRun) {
-      const txParams = { from: this.addr, to: routerAddr, value: valueIn, data: this.router(routerAddr, this.wallet).interface.encodeFunctionData('swapExactETHForTokens', [
-        minOut, addresses, this.addr, Math.floor(Date.now() / 1000) + deadlineSec,
-      ]) };
-      const estimatedGas = await this.estimateGas(txParams);
-      console.log(clr.yellow(`   [DRY RUN] Would execute swap with estimated gas ${estimatedGas.toString()}`));
-      return null;
-    }
-
-    const deadline = Math.floor(Date.now() / 1000) + deadlineSec;
-    const txParams = { from: this.addr, to: routerAddr, value: valueIn, data: this.router(routerAddr, this.wallet).interface.encodeFunctionData('swapExactETHForTokens', [
-      minOut, addresses, this.addr, deadline,
-    ]) };
-    const finalGasLimit = await this.estimateGas(txParams);
-
-    const tx = await this._retryWrite(
-      () => this.router(routerAddr, this.wallet).swapExactETHForTokens(
-        minOut, addresses, this.addr, deadline,
-        { from: this.addr, value: valueIn, gasLimit: finalGasLimit },
-      ),
-      'Native-in swap'
-    );
-    const receipt = await tx.wait(1);
-    console.log(clr.green('✅ Success'));
-    printTx(tx, receipt);
-    return receipt;
-  }
-
-  async _nativeOutSwap(routerAddr, resolved, amount, minOutStr, deadlineSec, gasLimit, dryRun, slippage = DEFAULT_SLIPPAGE) {
-    const wAddress = resolved[resolved.length - 1].address;
-    const addresses = [...resolved.slice(0, -1).map(t => t.address), wAddress];
-    const decimals = resolved[0].decimals;
-    const valueIn = parseAmt(amount, decimals);
-
-    const allowance = await this._retryView(
-      () => this.erc20(addresses[0]).allowance(this.addr, routerAddr),
-      'Allowance check'
-    );
-    if (allowance < valueIn) {
+    else if (dexConfig.type.startsWith('v3')) {
+      // V3 swap
+      const fee = feeTier || globalFlags.feeTier || dexConfig.feeTiers[1] || 3000;
+      
+      const amountOut = await this._retryView(
+        () => contract.quoteExactInputSingle(
+          tokenIn.address,
+          tokenOut.address,
+          fee,
+          amountIn,
+          0
+        ),
+        'V3 quote'
+      );
+      
+      const slippage = globalFlags.slippage ?? DEFAULT_SLIPPAGE;
+      const minAmountOut = (Number(amountOut) * (1 - slippage)).toFixed(0);
+      
       if (dryRun) {
-        console.log(clr.yellow(`⚠️  Insufficient allowance. Would approve ${amount}.`));
-      } else {
-        console.log(clr.yellow(`⚠️  Insufficient allowance. Approving...`));
-        await this.tokenApprove(addresses[0], routerAddr, amount);
+        console.log(clr.yellow('\n⚠️  DRY RUN MODE — not executing swap'));
+        console.log(clr.dim(`   Would swap: ${formatAmt(amountIn, tokenIn.decimals ?? 18)} ${tokenIn.symbol || resolvedPath[0]}`));
+        console.log(clr.dim(`   For: ${formatAmt(amountOut, tokenOut.decimals ?? 18)} ${tokenOut.symbol || resolvedPath[1]}`));
+        console.log(clr.dim(`   Fee: ${fee / 10000}%`));
+        return null;
       }
+      
+      console.log(clr.cyan(`\n🔄 Swapping ${clr.bold(formatAmt(amountIn, tokenIn.decimals ?? 18))} ${tokenIn.symbol || resolvedPath[0]} → ${tokenOut.symbol || resolvedPath[1]}`));
+      
+      // Approve if needed
+      await this._retryWrite(
+        () => this.erc20(tokenIn.address, this.wallet).approve(dexConfig.address, amountIn, { from: this.addr }),
+        'Token approve'
+      );
+      
+      const txParams = { from: this.addr, to: dexConfig.address };
+      const gasLimit = await this.estimateGas(txParams);
+      
+      const tx = await this._retryWrite(
+        () => contract.exactInputSingle(
+          tokenIn.address,
+          tokenOut.address,
+          fee,
+          this.addr,
+          deadline,
+          amountIn,
+          BigInt(minAmountOut),
+          0 // sqrtPriceLimitX96 = 0 means no limit
+        ),
+        'V3 swap'
+      );
+      
+      const receipt = await tx.wait(1);
+      console.log(clr.green('✅ Success'));
+      printTx(tx, receipt);
+      return receipt;
     }
-
-    const amounts = await this._retryView(
-      () => this.router(routerAddr).getAmountsOut(valueIn, addresses),
-      'Native-out quote'
-    );
-    const minOut = minOutStr
-      ? parseQuai(minOutStr)
-      : (amounts[amounts.length - 1] * BigInt(10000 - Math.round(slippage * 10000))) / 10000n;
-
-    console.log(clr.cyan(`🔄 Swap ${clr.bold(amount)} ${resolved[0].symbol} → min ${formatQuai(minOut)} QUAI`));
-    console.log(clr.dim(`   (${clr.yellow(slippage * 100 + '% slippage')})`));
-    console.log(clr.dim(`   Path: ${addresses.slice(0, -1).map(a => clr.cyan(a.slice(0, 10))).join(clr.dim(' → '))} → ${clr.cyan('QUAI')}`));
-
-    if (dryRun) {
-      const txParams = { from: this.addr, to: routerAddr, data: this.router(routerAddr, this.wallet).interface.encodeFunctionData('swapTokensForExactETH', [
-        valueIn, minOut, addresses, this.addr, Math.floor(Date.now() / 1000) + deadlineSec,
-      ]) };
-      const estimatedGas = await this.estimateGas(txParams);
-      console.log(clr.yellow(`   [DRY RUN] Would execute swap with estimated gas ${estimatedGas.toString()}`));
-      return null;
-    }
-
-    const deadline = Math.floor(Date.now() / 1000) + deadlineSec;
-    const txParams = { from: this.addr, to: routerAddr, data: this.router(routerAddr, this.wallet).interface.encodeFunctionData('swapTokensForExactETH', [
-      valueIn, minOut, addresses, this.addr, deadline,
-    ]) };
-    const finalGasLimit = await this.estimateGas(txParams);
-
-    const tx = await this._retryWrite(
-      () => this.router(routerAddr, this.wallet).swapTokensForExactETH(
-        valueIn, minOut, addresses, this.addr, deadline, { from: this.addr, gasLimit: finalGasLimit },
-      ),
-      'Native-out swap'
-    );
-    const receipt = await tx.wait(1);
-    console.log(clr.green('✅ Success'));
-    printTx(tx, receipt);
-    return receipt;
-  }
-
-  // ── Balances ──────────────────────────────────────────────────────────────
-
-  async allBalances() {
-    console.log(clr.bold(`\n📊 ${clr.cyan(this.addr)}\n`));
-    const nativeBal = await this._retryView(
-      () => this.provider.getBalance(this.addr),
-      'Native balance'
-    );
-    console.log(`${clr.bold('QUAI')}: ${clr.green(formatQuai(nativeBal))}`);
-    for (const [key, info] of Object.entries(config.tokens)) {
-      try {
-        const bal = await this._retryView(
-          () => this.erc20(info.address).balanceOf(this.addr),
-          `${info.symbol} balance`
-        );
-        const decimals = info.decimals ?? 18;
-        console.log(`${clr.bold(info.symbol)}: ${clr.green(formatAmt(bal, decimals))}`);
-      } catch (e) {
-        const errLabel = clr.red('(error reading)');
-        console.log(`${clr.bold(info.symbol)}: ${errLabel}`);
-      }
-    }
-    console.log();
+    
+    throw new Error(`Unsupported DEX type: ${dexConfig.type}`);
   }
 }
 
-// ─── CLI arg parsing helpers ─────────────────────────────────────────────────
-
-function parseSwapArgs(args) {
-  const result = {
-    router: null, path: null, amount: null, minOut: null,
-    deadlineSec: DEFAULT_DEADLINE_SEC, gasLimit: DEFAULT_GAS_LIMIT,
-    dryRun: false, slippage: DEFAULT_SLIPPAGE, gasEstimate: false,
-  };
-
-  let positional = 0;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === '--dry-run') { result.dryRun = true; continue; }
-    if (arg === '--gas-estimate') { result.gasEstimate = true; continue; }
-    if (arg.startsWith('--slippage=')) {
-      const val = parseFloat(arg.slice('--slippage='.length));
-      if (isNaN(val) || val < 0 || val > 1) throw new Error(`Invalid --slippage value: ${val} (must be 0-1)`);
-      result.slippage = val;
-      continue;
-    }
-    if (positional === 0) result.router = arg;
-    else if (positional === 1) result.path = arg;
-    else if (positional === 2) result.amount = arg;
-    else if (positional === 3) result.minOut = arg;
-    else if (positional === 4) result.deadlineSec = parseInt(arg) || DEFAULT_DEADLINE_SEC;
-    else if (positional === 5) result.gasLimit = parseInt(arg) || DEFAULT_GAS_LIMIT;
-    positional++;
-  }
-
-  if (!result.router || !result.path || !result.amount) {
-    throw new Error('Usage: router swap <router> <path> <amount> [minOut] [deadlineSec] [gasLimit] [--dry-run] [--slippage=X]');
-  }
-  return result;
-}
+// ─── CLI ─────────────────────────────────────────────────────────────────────
 
 function showHelp(command, subcommand) {
   const help = {
-    '': `Usage: node dex.js [--version] [--config=path] [--gas-buffer=X] <command> [subcommand] [args]
+    '': `Usage: node dex.js [--version] [--config=path] [--gas-buffer=X] [--fee=X] <command> [subcommand] [args]
 
 Global options:
   --version, -v              Show CLI version
   --config=<path>            Path to config file (default: config/dex.json)
   --gas-buffer=X             Gas buffer multiplier (0-1, default: ${DEFAULT_GAS_BUFFER})
+  --fee=X                    Fee tier for V3 DEXes (default: 3000 = 0.3%)
   --help, -h                 Show this help
 
 Native QUAI:
@@ -903,34 +874,28 @@ Token (any ERC20):
   token info <token>                          Token info (name, symbol, decimals)
   token list                                  List all registered tokens
 
-Router (any UniswapV2-compatible):
+Router (any DEX - V2, V3, or custom):
   router quote <router> <path> <amount>       Swap quote
-  router swap <router> <path> <amount> [minOut] [deadlineSec] [gasLimit] [--dry-run] [--slippage=X]
-  router list                                 List all registered routers
-
-Shortcuts:
-  balances                                    All balances (native + tokens)
-
-Swap options:
-  --dry-run          Simulate swap without executing
-  --slippage=X       Slippage tolerance (0-1, default: ${DEFAULT_SLIPPAGE})
+  router swap <router> <path> <amount> [--dry-run] [--slippage=X] [--fee=X]
+  router list                                 List all routers
 
 Examples:
-  node src/dex.js --version
-  node src/dex.js --config=my-config.json token balance WQUAI
-  node src/dex.js native balance
-  node src/dex.js token transfer WQUAI 0xRecipient... 10
-  node src/dex.js router swap quaiswap WQUAI,WQI 1 --slippage=0.03
-  node src/dex.js router swap quaiswap QUAI,WQI 1 --dry-run
-  node src/dex.js --gas-buffer=0.3 router swap quaiswap WQUAI,WQI 1`,
+  # V2 DEX (UniswapV2-compatible)
+  node dex.js router swap quaiswap-v2 WQUAI,WQI 1
+  node dex.js router swap quaiswap-v2 QUAI,WQI 1 --dry-run
+  
+  # V3 DEX (UniswapV3-compatible)
+  node dex.js router swap quaiswap-v3 WQUAI:3000,WQI 1 --fee=500
+  node dex.js router swap quaiswap-v3 QUAI,WQI 1 --fee=3000 --dry-run
+  
+  # All balances
+  node dex.js balances`,
   };
 
   if (command && help[command]) { console.log(help[command]); return true; }
   console.log(help['']);
   return true;
 }
-
-// ─── CLI ─────────────────────────────────────────────────────────────────────
 
 const cmds = {
   native: {
@@ -951,10 +916,11 @@ const cmds = {
     list: (c) => c.tokenList(),
   },
   router: {
-    quote: (c, a) => { if (a.length < 3) throw new Error('Usage: router quote <router> <path> <amount>'); return c.routerQuote(a[0], a[1], a[2]); },
+    quote: (c, a) => { if (a.length < 3) throw new Error('Usage: router quote <router> <path> <amount>'); return c.dexQuote(a[0], a[1], a[2], globalFlags.feeTier); },
     swap: (c, a) => {
-      const parsed = parseSwapArgs(a);
-      return c.routerSwap(parsed.router, parsed.path, parsed.amount, parsed.minOut, parsed.deadlineSec, parsed.gasLimit, parsed.dryRun, parsed.slippage);
+      if (a.length < 3) throw new Error('Usage: router swap <router> <path> <amount>');
+      const dryRun = a.includes('--dry-run');
+      return c.dexSwap(a[0], a[1], a[2], globalFlags.feeTier, dryRun);
     },
     list: (c) => c.routerList(),
   },
@@ -968,6 +934,9 @@ if (globalFlags.showVersion) {
   console.log(clr.dim(`Config: ${CONFIG_PATH}`));
   console.log(clr.dim(`RPC: ${RPC_URL}`));
   console.log(clr.dim(`Gas buffer: ${globalFlags.gasBuffer ?? DEFAULT_GAS_BUFFER} (${Math.round((globalFlags.gasBuffer ?? DEFAULT_GAS_BUFFER) * 100)}%)`));
+  if (globalFlags.feeTier) {
+    console.log(clr.dim(`Fee tier: ${globalFlags.feeTier} (${globalFlags.feeTier / 10000}%)`));
+  }
   process.exit(0);
 }
 

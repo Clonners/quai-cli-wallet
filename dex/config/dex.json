@@ -16,9 +16,14 @@
     }
   },
   "routers": {
-    "quaiswap": {
+    "quaiswap-v2": {
       "address": "0x0044E4779b3e1C88f931DE4940bC87C1a85628c3",
       "type": "uniswap-v2"
+    },
+    "quaiswap-v3": {
+      "address": "0x0044E4779b3e1C88f931DE4940bC87C1a85628c3",
+      "type": "uniswap-v3",
+      "feeTiers": [500, 3000, 10000]
     }
   },
   "defaults": {

@@ -1,18 +1,16 @@
-# @quai-wallet/dex-cli — Generic DEX & Token CLI
+# @quai-wallet/dex-cli — Multi-DEX CLI for Quai Network
 
-Generic CLI wallet for interacting with **any ERC20 token**, **native QUAI**, and **any UniswapV2-compatible router** on Quai Network.
+Universal CLI wallet for interacting with **any DEX on Quai Network** — supports UniswapV2, UniswapV3, and custom DEXes via config.
 
 ## Features
 
-- ✅ Native QUAI: balance, transfer
-- ✅ Any ERC20 token: balance, transfer, approve, allowance, info
-- ✅ Any UniswapV2-compatible router: quote, swap
-- ✅ Native ↔ token swaps (QUAI → token, token → QUAI)
-- ✅ Token/router registry in `config/dex.json`
-- ✅ Dry-run mode for swaps
-- ✅ Explorer links
-- ✅ Multi-shard support via `QUAI_RPC` env var
-- ✅ No wallet extension needed — uses private key from env
+- ✅ **Multi-DEX support** — UniswapV2, UniswapV3, custom routers via config
+- ✅ **Native QUAI** — balance, transfer, swap with native asset
+- ✅ **Any ERC20 token** — balance, transfer, approve, allowance, info
+- ✅ **Dry-run mode** — simulate swaps without executing
+- ✅ **Gas estimation** — MetaMask-style with re-estimate and configurable buffer
+- ✅ **Multi-shard** — switch shards via `QUAI_RPC` env var
+- ✅ **Colored output** — with `NO_COLOR` override
 
 ## Installation
 
@@ -34,58 +32,36 @@ Edit `config/dex.json`:
       "decimals": 18,
       "wrappedNative": true,
       "nativeAlias": "QUAI"
-    },
-    "WQI": {
-      "address": "0x002b2596EcF05C93a31ff916E8b456DF6C77c750",
-      "symbol": "WQI",
-      "decimals": 18,
-      "wrappedNative": true,
-      "nativeAlias": "QI"
     }
   },
   "routers": {
-    "quaiswap": {
-      "address": "0x0044E4779b3e1C88f931DE4940bC87C1a85628c3",
+    "my-dex-v2": {
+      "address": "0xRouterAddress...",
       "type": "uniswap-v2"
+    },
+    "my-dex-v3": {
+      "address": "0xRouterAddress...",
+      "type": "uniswap-v3",
+      "feeTiers": [500, 3000, 10000]
     }
   },
   "defaults": {
     "slippage": 0.05,
-    "deadlineSec": 3600,
-    "gasLimit": 500000,
     "gasBuffer": 0.2,
-    "rpc": "https://orchard.rpc.quai.network/cyprus1",
-    "explorer": "https://testnet.explorer.quai.network/tx/"
+    "rpc": "https://orchard.rpc.quai.network/cyprus1"
   }
 }
 ```
 
-### Defaults
+## Supported DEX Types
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `slippage` | `0.05` | Slippage tolerance (5%) |
-| `deadlineSec` | `3600` | Transaction deadline (1 hour) |
-| `gasLimit` | `500000` | Maximum gas limit cap |
-| `gasBuffer` | `0.2` | Gas buffer multiplier (20%, like MetaMask) |
-| `rpc` | `orchard.rpc.quai.network/cyprus1` | RPC endpoint |
-| `explorer` | `testnet.explorer.quai.network/tx/` | Block explorer |
-
-### Gas Estimation (MetaMask-style)
-
-The CLI uses a 3-step gas estimation strategy matching MetaMask:
-
-1. **First attempt** — `quai_estimateGas`
-2. **Re-estimate** — If transient failure (timeout, network error), retries once after 2s
-3. **Fallback** — If both fail or estimate exceeds cap, uses `DEFAULT_GAS_LIMIT`
-
-Non-retryable errors (contract revert, out of gas) skip re-estimate and use the cap directly.
+| Type | Description | Quote Method | Swap Method |
+|------|-------------|--------------|-------------|
+| `uniswap-v2` | UniswapV2-compatible | `getAmountsOut` | `swapExactTokensForTokens` |
+| `uniswap-v3` | UniswapV3-compatible | `quoteExactInputSingle` | `exactInputSingle` |
+| `custom` | Custom ABI | Config-defined | Config-defined |
 
 ## Usage
-
-```bash
-node src/dex.js <command> [subcommand] [args]
-```
 
 ### Native QUAI
 
@@ -94,13 +70,12 @@ node src/dex.js native balance
 node src/dex.js native transfer 0xRecipient... 10
 ```
 
-### Token (any ERC20)
+### Token Operations (ERC20)
 
 ```bash
-# Check balance
+# Balance
 node src/dex.js token balance WQUAI
 node src/dex.js token balance 0xAnyToken...
-node src/dex.js token balance WQUAI 0xOwnerAddress...  # anyone's balance
 
 # Transfer
 node src/dex.js token transfer WQUAI 0xRecipient... 10
@@ -108,98 +83,66 @@ node src/dex.js token transfer WQUAI 0xRecipient... 10
 # Approve spender
 node src/dex.js token approve WQUAI 0xRouter... 1000
 
-# Check allowance
-node src/dex.js token allowance WQUAI 0xSpender...
-
 # Token info
 node src/dex.js token info WQUAI
-
-# List all tokens
 node src/dex.js token list
 ```
 
-### Router (any UniswapV2-compatible)
+### DEX Operations
+
+#### UniswapV2-compatible
 
 ```bash
-# Token → Token
-node src/dex.js router quote quaiswap WQUAI,WQI 1
-node src/dex.js router swap quaiswap WQUAI,WQI 1
+# Quote
+node src/dex.js router quote quaiswap-v2 WQUAI,WQI 1
 
-# Native → Token (QUAI keyword)
-node src/dex.js router swap quaiswap QUAI,WQI 1
+# Swap
+node src/dex.js router swap quaiswap-v2 WQUAI,WQI 1
 
-# Token → Native (QUAI keyword)
-node src/dex.js router swap quaiswap WQI,QUAI 1
+# Native swap
+node src/dex.js router swap quaiswap-v2 QUAI,WQI 1
 
-# Dry run (no actual transaction)
-node src/dex.js router swap quaiswap QUAI,WQI 1 --dry-run
-
-# Custom params
-node src/dex.js router swap quaiswap WQUAI,WQI 1 0.9 3600 500000
-
-# List all routers
-node src/dex.js router list
+# Dry run
+node src/dex.js router swap quaiswap-v2 WQUAI,WQI 1 --dry-run
 ```
 
-### Shortcuts
+#### UniswapV3-compatible
 
 ```bash
-node src/dex.js balances  # All balances (native + tokens)
+# Quote with fee tier
+node src/dex.js router quote quaiswap-v3 WQUAI,WQI 1 --fee=3000
+
+# Swap with fee tier
+node src/dex.js router swap quaiswap-v3 WQUAI,WQI 1 --fee=500
+
+# Dry run
+node src/dex.js router swap quaiswap-v3 WQUAI,WQI 1 --fee=10000 --dry-run
 ```
 
-## Multi-Shard
-
-```bash
-QUAI_RPC=https://orchard.rpc.quai.network/cyprus2 node src/dex.js token balance WQUAI
-```
-
-## Adding New Tokens
-
-Add to `config/dex.json`:
-
-```json
-"NEW": {
-  "address": "0xYourToken...",
-  "symbol": "NEW",
-  "decimals": 18,
-  "wrappedNative": false
-}
-```
-
-For native tokens, add `nativeAlias` to enable native swap support:
-
-```json
-"WQUAI": {
-  "address": "...",
-  "symbol": "WQUAI",
-  "decimals": 18,
-  "wrappedNative": true,
-  "nativeAlias": "QUAI"  // enables 'QUAI' keyword in router paths
-}
-```
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `QUAI_PRIVATE_KEY` | Wallet private key (hex, with `0x` prefix) |
-| `QUAI_RPC` | Override RPC endpoint |
-| `NO_COLOR` | Set to `1` to disable ANSI colors |
-
-## CLI Flags
+### CLI Flags
 
 | Flag | Description |
 |------|-------------|
-| `--gas-buffer=X` | Gas buffer multiplier (0-1, default: 0.2 / 20%) |
-| `--slippage=X` | Slippage tolerance (0-1, default: 0.05 / 5%) |
+| `--gas-buffer=X` | Gas buffer (0-1, default: 0.2 / 20%) |
+| `--fee=X` | Fee tier for V3 DEXes (500 = 0.05%, 3000 = 0.3%, 10000 = 1%) |
 | `--dry-run` | Simulate swap without executing |
+| `--slippage=X` | Slippage tolerance (0-1, default: 0.05) |
 | `--config=path` | Path to config file |
+
+## Gas Estimation
+
+MetaMask-style 3-step strategy:
+
+1. **First attempt** — `quai_estimateGas`
+2. **Re-estimate** — If transient failure, retries once after 2s
+3. **Fallback** — If both fail, uses `DEFAULT_GAS_LIMIT` cap
 
 ## Security
 
-- ⚠️ Never commit your private key or `.env` file
-- ⚠️ The config file contains public testnet addresses — safe to share
-- ⚠️ Use `--dry-run` before executing real swaps
+- ✅ No private keys or mnemonics included
+- ✅ Addresses in config are public testnet deployments
+- ✅ Private key loaded from `QUAI_PRIVATE_KEY` env var only
+- ✅ `.gitignore` excludes sensitive files
 
 ## License
 
