@@ -4,9 +4,10 @@ Universal CLI wallet for interacting with **any DEX on Quai Network** — suppor
 
 ## Features
 
-- ✅ **Multi-DEX support** — UniswapV2, UniswapV3, custom routers via config
+- ✅ **Multi-DEX support** — UniswapV2, UniswapV3, and custom routers via config
 - ✅ **Native QUAI** — balance, transfer, swap with native asset
 - ✅ **Any ERC20 token** — balance, transfer, approve, allowance, info
+- ✅ **Liquidity management** — add/remove liquidity (V2)
 - ✅ **Dry-run mode** — simulate swaps without executing
 - ✅ **Gas estimation** — MetaMask-style with re-estimate and configurable buffer
 - ✅ **Multi-shard** — switch shards via `QUAI_RPC` env var
@@ -117,6 +118,25 @@ node src/dex.js router swap quaiswap-v3 WQUAI,WQI 1 --fee=500
 
 # Dry run
 node src/dex.js router swap quaiswap-v3 WQUAI,WQI 1 --fee=10000 --dry-run
+```
+
+### Liquidity Management (V2 only)
+
+```bash
+# Add liquidity (token-to-token)
+node src/dex.js router add-liquidity quaiswap-v2 WQUAI WQI 1 100
+
+# Add liquidity with native QUAI
+node src/dex.js router add-liquidity-native quaiswap-v2 WQI 100 1
+
+# Remove liquidity (token-to-token)
+node src/dex.js router remove-liquidity quaiswap-v2 WQUAI WQI 1
+
+# Remove liquidity with native QUAI
+node src/dex.js router remove-liquidity-native quaiswap-v2 WQI 1
+
+# Dry run
+node src/dex.js router add-liquidity quaiswap-v2 WQUAI WQI 1 100 --dry-run
 ```
 
 ### CLI Flags

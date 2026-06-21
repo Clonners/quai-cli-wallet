@@ -847,7 +847,241 @@ class Client {
     
     throw new Error(`Unsupported DEX type: ${dexConfig.type}`);
   }
+
+  // ── V2 Liquidity Management ───────────────────────────────────────────────
+  //
+  // Standard UniswapV2 router functions:
+  // - addLiquidity(tokenA, tokenB, amountADesired, amountBDesired, amountAMin, amountBMin, to, deadline)
+  // - addLiquidityETH(token, amountTokenDesired, amountTokenMin, amountETHMin, to, deadline)
+  // - removeLiquidity(tokenA, tokenB, liquidity, amountAMin, amountBMin, to, deadline)
+  // - removeLiquidityETH(token, liquidity, amountTokenMin, amountETHMin, to, deadline)
+
+  async addLiquidity(routerKey, tokenIn, tokenOut, amountIn, amountOut, dryRun = false) {
+    const router = resolveRouter(routerKey);
+    const builtinType = router.type.split('-')[0];
+    
+    if (builtinType !== 'v2') {
+      throw new Error('addLiquidity only supports UniswapV2-compatible routers');
+    }
+    
+    const tokenInInfo = resolveToken(tokenIn);
+    const tokenOutInfo = resolveToken(tokenOut);
+    
+    const amountInParsed = parseAmt(amountIn, tokenInInfo.decimals ?? 18);
+    const amountOutParsed = parseAmt(amountOut, tokenOutInfo.decimals ?? 18);
+    const deadline = Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC;
+    
+    // Calculate slippage
+    const slippage = globalFlags.slippage ?? DEFAULT_SLIPPAGE;
+    const amountInMin = (Number(amountInParsed) * (1 - slippage)).toFixed(0);
+    const amountOutMin = (Number(amountOutParsed) * (1 - slippage)).toFixed(0);
+    
+    if (dryRun) {
+      console.log(clr.yellow('\n⚠️  DRY RUN MODE — not adding liquidity'));
+      console.log(clr.dim(`   Would add: ${formatAmt(amountInParsed, tokenInInfo.decimals ?? 18)} ${tokenInInfo.symbol || tokenIn}`));
+      console.log(clr.dim(`   Would add: ${formatAmt(amountOutParsed, tokenOutInfo.decimals ?? 18)} ${tokenOutInfo.symbol || tokenOut}`));
+      console.log(clr.dim(`   Min amounts: ${amountInMin} ${tokenInInfo.symbol || tokenIn}, ${amountOutMin} ${tokenOutInfo.symbol || tokenOut}`));
+      return null;
+    }
+    
+    console.log(clr.cyan(`\n💧 Adding liquidity: ${clr.bold(tokenInInfo.symbol || tokenIn)} + ${clr.bold(tokenOutInfo.symbol || tokenOut)}`));
+    
+    // Approve both tokens to router
+    console.log(clr.dim(`   Approving ${tokenInInfo.symbol || tokenIn}...`));
+    await this._retryWrite(
+      () => this.erc20(tokenInInfo.address, this.wallet).approve(router.address, amountInParsed, { from: this.addr }),
+      'Token approve'
+    );
+    
+    console.log(clr.dim(`   Approving ${tokenOutInfo.symbol || tokenOut}...`));
+    await this._retryWrite(
+      () => this.erc20(tokenOutInfo.address, this.wallet).approve(router.address, amountOutParsed, { from: this.addr }),
+      'Token approve'
+    );
+    
+    // Call addLiquidity
+    const { contract } = this.dex(routerKey, this.wallet);
+    
+    const txParams = { from: this.addr, to: router.address };
+    const gasLimit = await this.estimateGas(txParams);
+    
+    const tx = await this._retryWrite(
+      () => contract.addLiquidity(
+        tokenInInfo.address,
+        tokenOutInfo.address,
+        amountInParsed,
+        amountOutParsed,
+        BigInt(amountInMin),
+        BigInt(amountOutMin),
+        this.addr,
+        deadline,
+        { from: this.addr, gasLimit }
+      ),
+      'Add liquidity'
+    );
+    
+    const receipt = await tx.wait(1);
+    console.log(clr.green('✅ Success'));
+    printTx(tx, receipt);
+    return receipt;
+  }
+
+  async addLiquidityNative(routerKey, tokenOut, amountOut, nativeAmount, dryRun = false) {
+    const router = resolveRouter(routerKey);
+    const builtinType = router.type.split('-')[0];
+    
+    if (builtinType !== 'v2') {
+      throw new Error('addLiquidityNative only supports UniswapV2-compatible routers');
+    }
+    
+    const tokenOutInfo = resolveToken(tokenOut);
+    
+    const amountOutParsed = parseAmt(amountOut, tokenOutInfo.decimals ?? 18);
+    const nativeParsed = parseQuai(nativeAmount);
+    const deadline = Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC;
+    
+    // Calculate slippage
+    const slippage = globalFlags.slippage ?? DEFAULT_SLIPPAGE;
+    const amountOutMin = (Number(amountOutParsed) * (1 - slippage)).toFixed(0);
+    const nativeMin = (Number(nativeParsed) * (1 - slippage)).toFixed(0);
+    
+    if (dryRun) {
+      console.log(clr.yellow('\n⚠️  DRY RUN MODE — not adding liquidity'));
+      console.log(clr.dim(`   Would add: ${formatQuai(nativeParsed)} QUAI + ${formatAmt(amountOutParsed, tokenOutInfo.decimals ?? 18)} ${tokenOutInfo.symbol || tokenOut}`));
+      console.log(clr.dim(`   Min amounts: ${nativeMin} QUAI, ${amountOutMin} ${tokenOutInfo.symbol || tokenOut}`));
+      return null;
+    }
+    
+    console.log(clr.cyan(`\n💧 Adding liquidity: ${clr.bold('QUAI')} + ${clr.bold(tokenOutInfo.symbol || tokenOut)}`));
+    
+    // Approve token to router
+    console.log(clr.dim(`   Approving ${tokenOutInfo.symbol || tokenOut}...`));
+    await this._retryWrite(
+      () => this.erc20(tokenOutInfo.address, this.wallet).approve(router.address, amountOutParsed, { from: this.addr }),
+      'Token approve'
+    );
+    
+    // Call addLiquidityETH (addLiquidityQUAI on Quai)
+    const { contract } = this.dex(routerKey, this.wallet);
+    
+    const txParams = { from: this.addr, to: router.address, value: nativeParsed };
+    const gasLimit = await this.estimateGas(txParams);
+    
+    const tx = await this._retryWrite(
+      () => contract.addLiquidityETH(
+        tokenOutInfo.address,
+        amountOutParsed,
+        BigInt(amountOutMin),
+        BigInt(nativeMin),
+        this.addr,
+        deadline,
+        { from: this.addr, gasLimit, value: nativeParsed }
+      ),
+      'Add liquidity native'
+    );
+    
+    const receipt = await tx.wait(1);
+    console.log(clr.green('✅ Success'));
+    printTx(tx, receipt);
+    return receipt;
+  }
+
+  async removeLiquidity(routerKey, tokenIn, tokenOut, liquidity, dryRun = false) {
+    const router = resolveRouter(routerKey);
+    const builtinType = router.type.split('-')[0];
+    
+    if (builtinType !== 'v2') {
+      throw new Error('removeLiquidity only supports UniswapV2-compatible routers');
+    }
+    
+    const tokenInInfo = resolveToken(tokenIn);
+    const tokenOutInfo = resolveToken(tokenOut);
+    
+    const liquidityParsed = parseAmt(liquidity, 18);
+    const deadline = Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC;
+    
+    if (dryRun) {
+      console.log(clr.yellow('\n⚠️  DRY RUN MODE — not removing liquidity'));
+      console.log(clr.dim(`   Would remove: ${formatAmt(liquidityParsed, 18)} LP tokens from ${tokenInInfo.symbol || tokenIn}/${tokenOutInfo.symbol || tokenOut} pool`));
+      return null;
+    }
+    
+    console.log(clr.cyan(`\n💧 Removing liquidity from ${clr.bold(tokenInInfo.symbol || tokenIn)}/${clr.bold(tokenOutInfo.symbol || tokenOut)} pool`));
+    
+    // Call removeLiquidity
+    const { contract } = this.dex(routerKey, this.wallet);
+    
+    const txParams = { from: this.addr, to: router.address };
+    const gasLimit = await this.estimateGas(txParams);
+    
+    const tx = await this._retryWrite(
+      () => contract.removeLiquidity(
+        tokenInInfo.address,
+        tokenOutInfo.address,
+        liquidityParsed,
+        0, // amountAMin
+        0, // amountBMin
+        this.addr,
+        deadline,
+        { from: this.addr, gasLimit }
+      ),
+      'Remove liquidity'
+    );
+    
+    const receipt = await tx.wait(1);
+    console.log(clr.green('✅ Success'));
+    printTx(tx, receipt);
+    return receipt;
+  }
+
+  async removeLiquidityNative(routerKey, tokenOut, liquidity, dryRun = false) {
+    const router = resolveRouter(routerKey);
+    const builtinType = router.type.split('-')[0];
+    
+    if (builtinType !== 'v2') {
+      throw new Error('removeLiquidityNative only supports UniswapV2-compatible routers');
+    }
+    
+    const tokenOutInfo = resolveToken(tokenOut);
+    
+    const liquidityParsed = parseAmt(liquidity, 18);
+    const deadline = Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC;
+    
+    if (dryRun) {
+      console.log(clr.yellow('\n⚠️  DRY RUN MODE — not removing liquidity'));
+      console.log(clr.dim(`   Would remove: ${formatAmt(liquidityParsed, 18)} LP tokens from QUAI/${tokenOutInfo.symbol || tokenOut} pool`));
+      return null;
+    }
+    
+    console.log(clr.cyan(`\n💧 Removing liquidity from ${clr.bold('QUAI')}/${clr.bold(tokenOutInfo.symbol || tokenOut)} pool`));
+    
+    // Call removeLiquidityETH (removeLiquidityQUAI on Quai)
+    const { contract } = this.dex(routerKey, this.wallet);
+    
+    const txParams = { from: this.addr, to: router.address };
+    const gasLimit = await this.estimateGas(txParams);
+    
+    const tx = await this._retryWrite(
+      () => contract.removeLiquidityETH(
+        tokenOutInfo.address,
+        liquidityParsed,
+        0, // amountTokenMin
+        0, // amountETHMin
+        this.addr,
+        deadline,
+        { from: this.addr, gasLimit }
+      ),
+      'Remove liquidity native'
+    );
+    
+    const receipt = await tx.wait(1);
+    console.log(clr.green('✅ Success'));
+    printTx(tx, receipt);
+    return receipt;
+  }
 }
+
+// ─── CLI ─────────────────────────────────────────────────────────────────────
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -879,6 +1113,12 @@ Router (any DEX - V2, V3, or custom):
   router swap <router> <path> <amount> [--dry-run] [--slippage=X] [--fee=X]
   router list                                 List all routers
 
+Liquidity (V2 only):
+  router add-liquidity <router> <tokenA> <tokenB> <amountA> <amountB> [--dry-run]
+  router add-liquidity-native <router> <token> <tokenAmount> <nativeAmount> [--dry-run]
+  router remove-liquidity <router> <tokenA> <tokenB> <liquidity> [--dry-run]
+  router remove-liquidity-native <router> <token> <liquidity> [--dry-run]
+
 Examples:
   # V2 DEX (UniswapV2-compatible)
   node dex.js router swap quaiswap-v2 WQUAI,WQI 1
@@ -887,6 +1127,14 @@ Examples:
   # V3 DEX (UniswapV3-compatible)
   node dex.js router swap quaiswap-v3 WQUAI:3000,WQI 1 --fee=500
   node dex.js router swap quaiswap-v3 QUAI,WQI 1 --fee=3000 --dry-run
+  
+  # Add liquidity (V2)
+  node dex.js router add-liquidity quaiswap-v2 WQUAI WQI 1 100
+  node dex.js router add-liquidity-native quaiswap-v2 WQI 100 1
+  
+  # Remove liquidity (V2)
+  node dex.js router remove-liquidity quaiswap-v2 WQUAI WQI 1
+  node dex.js router remove-liquidity-native quaiswap-v2 WQI 1
   
   # All balances
   node dex.js balances`,
@@ -921,6 +1169,26 @@ const cmds = {
       if (a.length < 3) throw new Error('Usage: router swap <router> <path> <amount>');
       const dryRun = a.includes('--dry-run');
       return c.dexSwap(a[0], a[1], a[2], globalFlags.feeTier, dryRun);
+    },
+    'add-liquidity': (c, a) => {
+      if (a.length < 5) throw new Error('Usage: router add-liquidity <router> <tokenA> <tokenB> <amountA> <amountB> [--dry-run]');
+      const dryRun = a.includes('--dry-run');
+      return c.addLiquidity(a[0], a[1], a[2], a[3], a[4], dryRun);
+    },
+    'add-liquidity-native': (c, a) => {
+      if (a.length < 4) throw new Error('Usage: router add-liquidity-native <router> <token> <tokenAmount> <nativeAmount> [--dry-run]');
+      const dryRun = a.includes('--dry-run');
+      return c.addLiquidityNative(a[0], a[1], a[2], a[3], dryRun);
+    },
+    'remove-liquidity': (c, a) => {
+      if (a.length < 4) throw new Error('Usage: router remove-liquidity <router> <tokenA> <tokenB> <liquidity> [--dry-run]');
+      const dryRun = a.includes('--dry-run');
+      return c.removeLiquidity(a[0], a[1], a[2], a[3], dryRun);
+    },
+    'remove-liquidity-native': (c, a) => {
+      if (a.length < 3) throw new Error('Usage: router remove-liquidity-native <router> <token> <liquidity> [--dry-run]');
+      const dryRun = a.includes('--dry-run');
+      return c.removeLiquidityNative(a[0], a[1], a[2], dryRun);
     },
     list: (c) => c.routerList(),
   },
