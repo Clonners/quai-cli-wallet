@@ -1,0 +1,17 @@
+{
+  "name": "@quai-wallet/dex-cli",
+  "version": "0.1.0",
+  "description": "Generic DEX CLI — ERC20 + Native + Router operations on Quai Network",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "qdex-dex": "src/dex.js"
+  },
+  "scripts": {
+    "check": "node --check src/dex.js",
+    "start": "node src/dex.js"
+  },
+  "dependencies": {
+    "quais": "^1.0.0-alpha.54"
+  }
+}

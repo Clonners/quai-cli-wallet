@@ -1,0 +1,31 @@
+{
+  "tokens": {
+    "WQUAI": {
+      "address": "0x005c46f661Baef20671943f2b4c087Df3E7CEb13",
+      "symbol": "WQUAI",
+      "decimals": 18,
+      "wrappedNative": true,
+      "nativeAlias": "QUAI"
+    },
+    "WQI": {
+      "address": "0x002b2596EcF05C93a31ff916E8b456DF6C77c750",
+      "symbol": "WQI",
+      "decimals": 18,
+      "wrappedNative": true,
+      "nativeAlias": "QI"
+    }
+  },
+  "routers": {
+    "quaiswap": {
+      "address": "0x0044E4779b3e1C88f931DE4940bC87C1a85628c3",
+      "type": "uniswap-v2"
+    }
+  },
+  "defaults": {
+    "slippage": 0.05,
+    "deadlineSec": 3600,
+    "gasLimit": 500000,
+    "rpc": "https://orchard.rpc.quai.network/cyprus1",
+    "explorer": "https://testnet.explorer.quai.network/tx/"
+  }
+}
