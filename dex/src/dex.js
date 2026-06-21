@@ -343,28 +343,70 @@ class Client {
     return this._networkInfo;
   }
 
-  // ── Dynamic gas estimation ────────────────────────────────────────────────
+  // ── Dynamic gas estimation (MetaMask-style) ──────────────────────────────
+  //
+  // Strategy (matches MetaMask):
+  //   1. eth_estimateGas
+  //   2. If transient failure → re-estimate once after delay
+  //   3. If estimate exceeds block gas limit → warn, cap it
+  //   4. If all fails → fallback to DEFAULT_GAS_LIMIT
+  //   5. Apply configurable buffer on top
 
   async estimateGas(txParams) {
+    const GAS_ESTIMATE_DELAY_MS = 2000;
+    const blockGasLimit = BigInt(DEFAULT_GAS_LIMIT);
+
+    // First estimate attempt
     try {
-      const estimated = await retryWithBackoff(
-        () => this.provider.estimateGas(txParams),
-        this.provider,
-        'Gas estimation'
-      );
-      // Add configurable buffer (default 20%, like MetaMask)
-      const bufferMultiplier = Math.round(this.gasBuffer * 100);
-      const withBuffer = (estimated * BigInt(100 + bufferMultiplier)) / 100n;
-      if (withBuffer > BigInt(DEFAULT_GAS_LIMIT)) {
-        console.log(clr.yellow(`   ⚠️  Estimated gas (${withBuffer.toString()}) exceeds cap, using ${DEFAULT_GAS_LIMIT}`));
-        return BigInt(DEFAULT_GAS_LIMIT);
+      const estimated = await this.provider.estimateGas(txParams);
+      const result = this._applyGasBuffer(estimated);
+
+      // Check if estimate is unreasonably high (like MetaMask does)
+      if (estimated > blockGasLimit) {
+        console.log(clr.yellow(`   ⚠️  Estimate (${estimated.toString()}) exceeds gas limit cap (${blockGasLimit.toString()}), capped`));
+        return blockGasLimit;
       }
-      console.log(clr.dim(`   Gas estimate: ${estimated.toString()} → ${clr.yellow(withBuffer.toString())} (with ${bufferMultiplier}% buffer)`));
-      return withBuffer;
-    } catch {
-      console.log(clr.yellow(`   ⚠️  Gas estimation failed, falling back to ${DEFAULT_GAS_LIMIT}`));
+
+      return result;
+    } catch (firstError) {
+      // Transient error → re-estimate once (MetaMask pattern)
+      if (isRetryable(firstError)) {
+        console.log(clr.yellow(`   ⚠️  Gas estimation failed: ${firstError.message}`));
+        console.log(clr.dim(`   Re-estimating in ${GAS_ESTIMATE_DELAY_MS}ms...`));
+        await sleep(GAS_ESTIMATE_DELAY_MS);
+
+        try {
+          const reEstimated = await this.provider.estimateGas(txParams);
+          const result = this._applyGasBuffer(reEstimated);
+
+          console.log(clr.green(`   ✅ Re-estimate successful: ${reEstimated.toString()}`));
+          return result;
+        } catch (secondError) {
+          console.log(clr.yellow(`   ⚠️  Re-estimate also failed: ${secondError.message}`));
+          console.log(clr.yellow(`   Using fallback gas limit: ${DEFAULT_GAS_LIMIT}`));
+          return blockGasLimit;
+        }
+      }
+
+      // Non-retryable error (e.g., contract revert, out of gas, execution failed)
+      // MetaMask behavior: log warning, use cap
+      console.log(clr.yellow(`   ⚠️  Gas estimation failed (non-transient): ${firstError.message}`));
+      console.log(clr.yellow(`   Using fallback gas limit: ${DEFAULT_GAS_LIMIT}`));
+      return blockGasLimit;
+    }
+  }
+
+  _applyGasBuffer(estimated) {
+    const bufferMultiplier = Math.round(this.gasBuffer * 100);
+    const withBuffer = (estimated * BigInt(100 + bufferMultiplier)) / 100n;
+
+    if (withBuffer > BigInt(DEFAULT_GAS_LIMIT)) {
+      console.log(clr.yellow(`   ⚠️  With buffer (${withBuffer.toString()}) exceeds cap, using ${DEFAULT_GAS_LIMIT}`));
       return BigInt(DEFAULT_GAS_LIMIT);
     }
+
+    console.log(clr.dim(`   Gas estimate: ${estimated.toString()} → ${clr.yellow(withBuffer.toString())} (with ${bufferMultiplier}% buffer)`));
+    return withBuffer;
   }
 
   // ── Wrapped RPC calls with retry ──────────────────────────────────────────

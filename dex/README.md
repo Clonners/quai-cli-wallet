@@ -71,6 +71,16 @@ Edit `config/dex.json`:
 | `rpc` | `orchard.rpc.quai.network/cyprus1` | RPC endpoint |
 | `explorer` | `testnet.explorer.quai.network/tx/` | Block explorer |
 
+### Gas Estimation (MetaMask-style)
+
+The CLI uses a 3-step gas estimation strategy matching MetaMask:
+
+1. **First attempt** — `eth_estimateGas`
+2. **Re-estimate** — If transient failure (timeout, network error), retries once after 2s
+3. **Fallback** — If both fail or estimate exceeds cap, uses `DEFAULT_GAS_LIMIT`
+
+Non-retryable errors (contract revert, out of gas) skip re-estimate and use the cap directly.
+
 ## Usage
 
 ```bash
