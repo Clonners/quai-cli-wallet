@@ -53,11 +53,23 @@ Edit `config/dex.json`:
     "slippage": 0.05,
     "deadlineSec": 3600,
     "gasLimit": 500000,
+    "gasBuffer": 0.2,
     "rpc": "https://orchard.rpc.quai.network/cyprus1",
     "explorer": "https://testnet.explorer.quai.network/tx/"
   }
 }
 ```
+
+### Defaults
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `slippage` | `0.05` | Slippage tolerance (5%) |
+| `deadlineSec` | `3600` | Transaction deadline (1 hour) |
+| `gasLimit` | `500000` | Maximum gas limit cap |
+| `gasBuffer` | `0.2` | Gas buffer multiplier (20%, like MetaMask) |
+| `rpc` | `orchard.rpc.quai.network/cyprus1` | RPC endpoint |
+| `explorer` | `testnet.explorer.quai.network/tx/` | Block explorer |
 
 ## Usage
 
@@ -163,6 +175,15 @@ For native tokens, add `nativeAlias` to enable native swap support:
 | `QUAI_PRIVATE_KEY` | Wallet private key (hex, with `0x` prefix) |
 | `QUAI_RPC` | Override RPC endpoint |
 | `NO_COLOR` | Set to `1` to disable ANSI colors |
+
+## CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--gas-buffer=X` | Gas buffer multiplier (0-1, default: 0.2 / 20%) |
+| `--slippage=X` | Slippage tolerance (0-1, default: 0.05 / 5%) |
+| `--dry-run` | Simulate swap without executing |
+| `--config=path` | Path to config file |
 
 ## Security
 

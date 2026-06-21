@@ -25,6 +25,7 @@
     "slippage": 0.05,
     "deadlineSec": 3600,
     "gasLimit": 500000,
+    "gasBuffer": 0.2,
     "rpc": "https://orchard.rpc.quai.network/cyprus1",
     "explorer": "https://testnet.explorer.quai.network/tx/"
   }

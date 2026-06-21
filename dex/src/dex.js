@@ -93,6 +93,9 @@ function validateConfig(raw) {
     if (raw.defaults.rpc && typeof raw.defaults.rpc !== 'string') {
       errors.push('defaults.rpc must be a string URL');
     }
+    if (raw.defaults.gasBuffer !== undefined && (raw.defaults.gasBuffer < 0 || raw.defaults.gasBuffer > 1)) {
+      errors.push('defaults.gasBuffer must be between 0 and 1');
+    }
   }
 
   if (errors.length > 0) {
@@ -110,6 +113,7 @@ function parseGlobalFlags(argv) {
   const cleaned = [];
   let configPath = null;
   let showVersion = false;
+  let gasBuffer = null;
 
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
@@ -130,10 +134,26 @@ function parseGlobalFlags(argv) {
       continue;
     }
 
+    if (arg === '--gas-buffer') {
+      gasBuffer = parseFloat(argv[++i]);
+      if (isNaN(gasBuffer) || gasBuffer < 0 || gasBuffer > 1) {
+        throw new Error(`--gas-buffer must be between 0 and 1, got: ${gasBuffer}`);
+      }
+      continue;
+    }
+
+    if (arg.startsWith('--gas-buffer=')) {
+      gasBuffer = parseFloat(arg.slice('--gas-buffer='.length));
+      if (isNaN(gasBuffer) || gasBuffer < 0 || gasBuffer > 1) {
+        throw new Error(`--gas-buffer must be between 0 and 1, got: ${gasBuffer}`);
+      }
+      continue;
+    }
+
     cleaned.push(arg);
   }
 
-  return { configPath, showVersion, cleaned };
+  return { configPath, showVersion, gasBuffer, cleaned };
 }
 
 const globalFlags = parseGlobalFlags(process.argv);
@@ -158,6 +178,7 @@ const RPC_URL = process.env.QUAI_RPC || config.defaults.rpc || 'https://orchard.
 const DEFAULT_SLIPPAGE = config.defaults.slippage ?? 0.05;
 const DEFAULT_DEADLINE_SEC = config.defaults.deadlineSec ?? 3600;
 const DEFAULT_GAS_LIMIT = config.defaults.gasLimit ?? 500000;
+const DEFAULT_GAS_BUFFER = config.defaults.gasBuffer ?? 0.2;
 const EXPLORER_URL = config.defaults.explorer ?? '';
 
 // ─── Retry with exponential backoff ─────────────────────────────────────────
@@ -283,11 +304,12 @@ function printTx(tx, receipt) {
 // ─── Client ──────────────────────────────────────────────────────────────────
 
 class Client {
-  constructor() {
+  constructor(gasBuffer = null) {
     // usePathing: false for Orchard testnet (prime endpoint not available)
     this.provider = new JsonRpcProvider(RPC_URL, undefined, { usePathing: false });
     this.wallet = this._loadWallet();
     this._networkInfo = null;
+    this.gasBuffer = gasBuffer !== null ? gasBuffer : DEFAULT_GAS_BUFFER;
   }
 
   _loadWallet() {
@@ -330,13 +352,14 @@ class Client {
         this.provider,
         'Gas estimation'
       );
-      // Add 20% buffer
-      const withBuffer = (estimated * 120n) / 100n;
+      // Add configurable buffer (default 20%, like MetaMask)
+      const bufferMultiplier = Math.round(this.gasBuffer * 100);
+      const withBuffer = (estimated * BigInt(100 + bufferMultiplier)) / 100n;
       if (withBuffer > BigInt(DEFAULT_GAS_LIMIT)) {
         console.log(clr.yellow(`   ⚠️  Estimated gas (${withBuffer.toString()}) exceeds cap, using ${DEFAULT_GAS_LIMIT}`));
         return BigInt(DEFAULT_GAS_LIMIT);
       }
-      console.log(clr.dim(`   Gas estimate: ${estimated.toString()} → ${clr.yellow(withBuffer.toString())} (with 20% buffer)`));
+      console.log(clr.dim(`   Gas estimate: ${estimated.toString()} → ${clr.yellow(withBuffer.toString())} (with ${bufferMultiplier}% buffer)`));
       return withBuffer;
     } catch {
       console.log(clr.yellow(`   ⚠️  Gas estimation failed, falling back to ${DEFAULT_GAS_LIMIT}`));
@@ -809,11 +832,12 @@ function parseSwapArgs(args) {
 
 function showHelp(command, subcommand) {
   const help = {
-    '': `Usage: node dex.js [--version] [--config=path] <command> [subcommand] [args]
+    '': `Usage: node dex.js [--version] [--config=path] [--gas-buffer=X] <command> [subcommand] [args]
 
 Global options:
   --version, -v              Show CLI version
   --config=<path>            Path to config file (default: config/dex.json)
+  --gas-buffer=X             Gas buffer multiplier (0-1, default: ${DEFAULT_GAS_BUFFER})
   --help, -h                 Show this help
 
 Native QUAI:
@@ -846,7 +870,8 @@ Examples:
   node src/dex.js native balance
   node src/dex.js token transfer WQUAI 0xRecipient... 10
   node src/dex.js router swap quaiswap WQUAI,WQI 1 --slippage=0.03
-  node src/dex.js router swap quaiswap QUAI,WQI 1 --dry-run`,
+  node src/dex.js router swap quaiswap QUAI,WQI 1 --dry-run
+  node src/dex.js --gas-buffer=0.3 router swap quaiswap WQUAI,WQI 1`,
   };
 
   if (command && help[command]) { console.log(help[command]); return true; }
@@ -891,6 +916,7 @@ if (globalFlags.showVersion) {
   console.log(`qdex CLI v${CLI_VERSION}`);
   console.log(clr.dim(`Config: ${CONFIG_PATH}`));
   console.log(clr.dim(`RPC: ${RPC_URL}`));
+  console.log(clr.dim(`Gas buffer: ${globalFlags.gasBuffer ?? DEFAULT_GAS_BUFFER} (${Math.round((globalFlags.gasBuffer ?? DEFAULT_GAS_BUFFER) * 100)}%)`));
   process.exit(0);
 }
 
@@ -911,7 +937,7 @@ if (!handler) {
   process.exit(1);
 }
 
-const client = new Client();
+const client = new Client(globalFlags.gasBuffer);
 
 (async () => {
   try {
