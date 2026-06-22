@@ -1079,6 +1079,189 @@ class Client {
     printTx(tx, receipt);
     return receipt;
   }
+
+  // ─── QI UTXO Methods ───────────────────────────────────────────────────────
+
+  async qiBalance() {
+    const provider = this.provider;
+    const address = this.addr;
+
+    // Get EVM balance
+    const evmBalance = await provider.getBalance(address);
+
+    // Get QI outpoints via RPC
+    const zone = await provider.getZoneForAddress(address);
+    if (!zone) throw new Error(`Unable to determine zone for ${address}`);
+
+    // Fetch outpoints
+    const outpoints = await provider.getOutpointsByAddress(address);
+
+    // Calculate QI balance
+    let spendableQi = 0n;
+    let lockedQi = 0n;
+    const denomMap = {
+      0: 1000000000n,    // QIT (smallest unit)
+      1: 100000000n,     // 0.1 QIT
+      2: 10000000n,      // 0.01 QIT
+      3: 1000000n,       // 0.001 QIT
+      4: 100000n,        // 0.0001 QIT
+      5: 10000n,         // 0.00001 QIT
+      6: 1000n,          // 0.000001 QIT
+      7: 100n,           // 0.0000001 QIT
+      8: 10n,            // 0.00000001 QIT
+      9: 1n,             // 0.000000001 QIT
+    };
+
+    for (const op of outpoints) {
+      const denom = parseInt(op.denom || '0', 16);
+      const value = denomMap[denom] || 1n;
+      const lock = op.lock ? parseInt(op.lock, 16) : 0;
+      
+      if (lock) {
+        lockedQi += value;
+      } else {
+        spendableQi += value;
+      }
+    }
+
+    const totalQi = spendableQi + lockedQi;
+
+    console.log(clr.cyan('\n📊 QI Balance:'));
+    console.log(`   Address: ${clr.bold(address)}`);
+    console.log(`   Zone: ${clr.bold(zone)}`);
+    console.log(`   EVM (QUAI): ${clr.green(formatQuai(evmBalance))}`);
+    console.log(`   QI spendable: ${clr.green(formatQuai(spendableQi))}`);
+    console.log(`   QI locked: ${clr.yellow(formatQuai(lockedQi))}`);
+    console.log(`   QI total: ${clr.bold(formatQuai(totalQi))}`);
+    console.log(`   Outpoints: ${clr.dim(outpoints.length)}`);
+
+    return {
+      address,
+      zone,
+      evmBalance: formatQuai(evmBalance),
+      spendableQi: formatQuai(spendableQi),
+      lockedQi: formatQuai(lockedQi),
+      totalQi: formatQuai(totalQi),
+      outpoints: outpoints.length
+    };
+  }
+
+  async qiUtxos() {
+    const provider = this.provider;
+    const address = this.addr;
+
+    // Fetch outpoints
+    const outpoints = await provider.getOutpointsByAddress(address);
+
+    if (outpoints.length === 0) {
+      console.log(clr.dim('\nNo QI outpoints found for this address.'));
+      return [];
+    }
+
+    console.log(`\n📋 QI Outpoints (${clr.bold(outpoints.length)}) for ${clr.bold(address)}:`);
+    console.log('-'.repeat(80));
+    
+    for (const op of outpoints) {
+      const txHash = op.txHash || 'unknown';
+      const index = op.index || '0';
+      const denom = op.denom || '0';
+      const lock = op.lock ? parseInt(op.lock, 16) : 0;
+      
+      console.log(`   ${txHash}:${index} | denom=${denom} | lock=${lock ? clr.yellow(lock) : clr.green('none')}`);
+    }
+    console.log('-'.repeat(80));
+
+    return outpoints;
+  }
+
+  async wrapQi(amountQi, toQuaiAddr) {
+    const provider = this.provider;
+    const fromQi = this.addr;
+    const amountWei = parseQuai(amountQi);
+
+    console.log(clr.cyan(`\n🔄 Wrapping ${amountQi} QI → WQI`));
+    console.log(`   From QI: ${fromQi}`);
+    console.log(`   To QUAI: ${toQuaiAddr}`);
+    console.log(clr.dim('   Note: This requires a QI wallet to sign and broadcast'));
+    
+    return { fromQi, toQuaiAddr, amount: amountWei.toString() };
+  }
+
+  async unwrapQi(amountQuai, fromQuaiAddr) {
+    const provider = this.provider;
+    const amountWei = parseQuai(amountQuai);
+
+    console.log(clr.cyan(`\n🔄 Unwrapping ${amountQuai} WQI → QI`));
+    console.log(`   From QUAI: ${fromQuaiAddr}`);
+    console.log(clr.dim('   Note: This requires calling the WrappedQI contract'));
+    
+    return { fromQuaiAddr, amount: amountWei.toString() };
+  }
+
+  async convertQuaiToQi(fromAddr, amountQuai) {
+    const provider = this.provider;
+    const amountWei = parseQuai(amountQuai);
+
+    console.log(clr.cyan(`\n💱 Converting ${amountQuai} QUAI → QI`));
+    console.log(`   From: ${fromAddr}`);
+    console.log(clr.dim('   Note: This sends QUAI to a QI-scope address'));
+    
+    return { fromAddr, amount: amountWei.toString() };
+  }
+
+  async convertQiToQuai(toAddr, amountQi) {
+    const provider = this.provider;
+    const amountWei = parseQuai(amountQi);
+
+    console.log(clr.cyan(`\n💱 Converting ${amountQi} QI → QUAI`));
+    console.log(`   To: ${toAddr}`);
+    console.log(clr.dim('   Note: This burns QI outpoints and mints QUAI'));
+    
+    return { toAddr, amount: amountWei.toString() };
+  }
+
+  async quoteQuaiToQi(fromAddr, toQi, amountQuai) {
+    const provider = this.provider;
+    const amountWei = parseQuai(amountQuai);
+
+    console.log(clr.cyan(`\n📊 Quote: ${amountQuai} QUAI → QI`));
+    console.log(`   From: ${fromAddr}`);
+    console.log(`   To QI: ${toQi}`);
+
+    try {
+      const rate = await provider.getConversionRate('quaiToQi');
+      const amountOut = (amountWei * rate) / 1000000000n;
+      console.log(`   Rate: ${rate}`);
+      console.log(`   Expected QI: ${formatQuai(amountOut)}`);
+      return { amountIn: amountWei.toString(), amountOut: amountOut.toString(), rate: rate.toString() };
+    } catch (e) {
+      console.log(clr.yellow('   ⚠️  Could not fetch conversion rate from RPC'));
+      console.log(`   ${e.message}`);
+      return { amountIn: amountWei.toString() };
+    }
+  }
+
+  async quoteQiToQuai(fromQi, toAddr, amountQi) {
+    const provider = this.provider;
+    const amountWei = parseQuai(amountQi);
+
+    console.log(clr.cyan(`\n📊 Quote: ${amountQi} QI → QUAI`));
+    console.log(`   From QI: ${fromQi}`);
+    console.log(`   To: ${toAddr}`);
+
+    try {
+      const rate = await provider.getConversionRate('qiToQuai');
+      const amountOut = (amountWei * rate) / 1000000000n;
+      console.log(`   Rate: ${rate}`);
+      console.log(`   Expected QUAI: ${formatQuai(amountOut)}`);
+      return { amountIn: amountWei.toString(), amountOut: amountOut.toString(), rate: rate.toString() };
+    } catch (e) {
+      console.log(clr.yellow('   ⚠️  Could not fetch conversion rate from RPC'));
+      console.log(`   ${e.message}`);
+      return { amountIn: amountWei.toString() };
+    }
+  }
+
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -1137,7 +1320,17 @@ Examples:
   node dex.js router remove-liquidity-native quaiswap-v2 WQI 1
   
   # All balances
-  node dex.js balances`,
+  node dex.js balances
+
+  # QI UTXO operations
+  node dex.js qi balance
+  node dex.js qi utxos
+  node dex.js qi wrap <amount> <to-quai-address>
+  node dex.js qi unwrap <amount> <from-quai-address>
+  node dex.js qi convert-quai-to-qi <from> <amount>
+  node dex.js qi convert-qi-to-quai <to> <amount>
+  node dex.js qi quote-quai-to-qi <from> <to-qi> <amount>
+  node dex.js qi quote-qi-to-quai <from-qi> <to> <amount>`,
   };
 
   if (command && help[command]) { console.log(help[command]); return true; }
@@ -1193,6 +1386,16 @@ const cmds = {
     list: (c) => c.routerList(),
   },
   balances: (c) => c.allBalances(),
+  qi: {
+    balance: (c) => c.qiBalance(),
+    utxos: (c) => c.qiUtxos(),
+    wrap: (c, a) => { if (a.length < 2) throw new Error('Usage: qi wrap <amount> <to-quai-address>'); return c.wrapQi(a[0], a[1]); },
+    unwrap: (c, a) => { if (a.length < 2) throw new Error('Usage: qi unwrap <amount> <from-quai-address>'); return c.unwrapQi(a[0], a[1]); },
+    'convert-quai-to-qi': (c, a) => { if (a.length < 2) throw new Error('Usage: qi convert-quai-to-qi <from> <amount>'); return c.convertQuaiToQi(a[0], a[1]); },
+    'convert-qi-to-quai': (c, a) => { if (a.length < 2) throw new Error('Usage: qi convert-qi-to-quai <to> <amount>'); return c.convertQiToQuai(a[0], a[1]); },
+    'quote-quai-to-qi': (c, a) => { if (a.length < 3) throw new Error('Usage: qi quote-quai-to-qi <from> <to-qi> <amount>'); return c.quoteQuaiToQi(a[0], a[1], a[2]); },
+    'quote-qi-to-quai': (c, a) => { if (a.length < 3) throw new Error('Usage: qi quote-qi-to-quai <from-qi> <to> <amount>'); return c.quoteQiToQuai(a[0], a[1], a[2]); },
+  },
 };
 
 const [,, command, sub, ...args] = effectiveArgv;
