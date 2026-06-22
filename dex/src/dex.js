@@ -1174,39 +1174,36 @@ class Client {
     return outpoints;
   }
 
-  async wrapQi(amountQi, toQuaiAddr) {
-    const provider = this.provider;
-    const fromQi = this.addr;
-    const amountWei = parseQuai(amountQi);
-
-    console.log(clr.cyan(`\n🔄 Wrapping ${amountQi} QI → WQI`));
-    console.log(`   From QI: ${fromQi}`);
-    console.log(`   To QUAI: ${toQuaiAddr}`);
-    console.log(clr.dim('   Note: This requires a QI wallet to sign and broadcast'));
-    
-    return { fromQi, toQuaiAddr, amount: amountWei.toString() };
-  }
-
-  async unwrapQi(amountQuai, fromQuaiAddr) {
-    const provider = this.provider;
-    const amountWei = parseQuai(amountQuai);
-
-    console.log(clr.cyan(`\n🔄 Unwrapping ${amountQuai} WQI → QI`));
-    console.log(`   From QUAI: ${fromQuaiAddr}`);
-    console.log(clr.dim('   Note: This requires calling the WrappedQI contract'));
-    
-    return { fromQuaiAddr, amount: amountWei.toString() };
-  }
+  // ─── QI ↔ QUAI Conversion ──────────────────────────────────────────────────
 
   async convertQuaiToQi(fromAddr, amountQuai) {
     const provider = this.provider;
+    const wallet = this.wallet;
     const amountWei = parseQuai(amountQuai);
 
     console.log(clr.cyan(`\n💱 Converting ${amountQuai} QUAI → QI`));
     console.log(`   From: ${fromAddr}`);
-    console.log(clr.dim('   Note: This sends QUAI to a QI-scope address'));
-    
-    return { fromAddr, amount: amountWei.toString() };
+
+    // Get unused QI address for conversion
+    const qiAddr = await this.qiNextAddress();
+    console.log(`   To QI: ${qiAddr.address}`);
+
+    // Build conversion transaction
+    const txParams = { from: fromAddr, to: qiAddr.address, value: amountWei };
+    const gasLimit = await this.estimateGas(txParams);
+
+    const tx = await wallet.sendTransaction({
+      from: fromAddr,
+      to: qiAddr.address,
+      value: amountWei,
+      gasLimit,
+    });
+
+    const receipt = await tx.wait(1);
+    console.log(clr.green('✅ Conversion successful!'));
+    printTx(tx, receipt);
+
+    return receipt;
   }
 
   async convertQiToQuai(toAddr, amountQi) {
@@ -1215,8 +1212,9 @@ class Client {
 
     console.log(clr.cyan(`\n💱 Converting ${amountQi} QI → QUAI`));
     console.log(`   To: ${toAddr}`);
-    console.log(clr.dim('   Note: This burns QI outpoints and mints QUAI'));
-    
+    console.log(clr.yellow('   ⚠️  Qi conversion requires QiHDWallet initialization'));
+    console.log(clr.dim('   Use the bot CLI for full Qi conversion functionality'));
+
     return { toAddr, amount: amountWei.toString() };
   }
 
@@ -1229,11 +1227,10 @@ class Client {
     console.log(`   To QI: ${toQi}`);
 
     try {
-      const rate = await provider.getConversionRate('quaiToQi');
-      const amountOut = (amountWei * rate) / 1000000000n;
-      console.log(`   Rate: ${rate}`);
+      const result = await provider.send('quai_quaiToQi', [amountWei.toString(), 'latest']);
+      const amountOut = BigInt(result || '0');
       console.log(`   Expected QI: ${formatQuai(amountOut)}`);
-      return { amountIn: amountWei.toString(), amountOut: amountOut.toString(), rate: rate.toString() };
+      return { amountIn: amountWei.toString(), amountOut: amountOut.toString() };
     } catch (e) {
       console.log(clr.yellow('   ⚠️  Could not fetch conversion rate from RPC'));
       console.log(`   ${e.message}`);
@@ -1250,11 +1247,10 @@ class Client {
     console.log(`   To: ${toAddr}`);
 
     try {
-      const rate = await provider.getConversionRate('qiToQuai');
-      const amountOut = (amountWei * rate) / 1000000000n;
-      console.log(`   Rate: ${rate}`);
+      const result = await provider.send('quai_qiToQuai', [amountWei.toString(), 'latest']);
+      const amountOut = BigInt(result || '0');
       console.log(`   Expected QUAI: ${formatQuai(amountOut)}`);
-      return { amountIn: amountWei.toString(), amountOut: amountOut.toString(), rate: rate.toString() };
+      return { amountIn: amountWei.toString(), amountOut: amountOut.toString() };
     } catch (e) {
       console.log(clr.yellow('   ⚠️  Could not fetch conversion rate from RPC'));
       console.log(`   ${e.message}`);
@@ -1442,6 +1438,40 @@ class Client {
     const receipt = await tx.wait(1);
 
     console.log(clr.green('✅ Claim successful!'));
+    printTx(tx, receipt);
+
+    return receipt;
+  }
+
+  async qiUnwrap(amountWqi, fromQuaiAddr) {
+    const provider = this.provider;
+    const wallet = this.wallet;
+    const wqiContract = config.tokens?.WQI?.address;
+    
+    if (!wqiContract) {
+      throw new Error('WQI token address not configured');
+    }
+
+    const amountWei = parseQuai(amountWqi);
+
+    console.log(clr.cyan(`\n🔄 Unwrapping ${amountWqi} WQI → QI`));
+    console.log(`   From: ${fromQuaiAddr}`);
+    console.log(`   WQI contract: ${wqiContract}`);
+
+    // Build unwrap transaction
+    const contractABI = ['function unwrapQi(address,uint256,uint64)'];
+    const contract = new Contract(wqiContract, contractABI, wallet);
+
+    // Get unused QI address for output
+    const qiAddr = await this.qiNextAddress();
+    
+    const txParams = { from: fromQuaiAddr, to: wqiContract };
+    const gasLimit = await this.estimateGas(txParams);
+
+    const tx = await contract.unwrapQi(qiAddr.address, amountWei, 1000000, { from: fromQuaiAddr, gasLimit });
+    const receipt = await tx.wait(1);
+
+    console.log(clr.green('✅ Unwrap successful!'));
     printTx(tx, receipt);
 
     return receipt;
@@ -1737,7 +1767,7 @@ const cmds = {
     send: (c, a) => { if (a.length < 2) throw new Error('Usage: qi send <payment-code> <amount> [origin-zone] [dest-zone]'); return c.qiSend(a[0], a[1], a[2] || 'cyprus1', a[3] || 'cyprus1'); },
     aggregate: (c, a) => c.qiAggregate(a[0] || 'cyprus1'),
     wrap: (c, a) => { if (a.length < 2) throw new Error('Usage: qi wrap <amount> <to-quai-address>'); return c.qiWrap(a[0], a[1]); },
-    unwrap: (c, a) => { if (a.length < 2) throw new Error('Usage: qi unwrap <amount> <from-quai-address>'); return c.unwrapQi(a[0], a[1]); },
+    unwrap: (c, a) => { if (a.length < 2) throw new Error('Usage: qi unwrap <amount> <from-quai-address>'); return c.qiUnwrap(a[0], a[1]); },
     'deposit-status': (c, a) => { if (!a[0]) throw new Error('Usage: qi deposit-status <address>'); return c.qiDepositStatus(a[0]); },
     'claim-deposit': (c, a) => c.qiClaimDeposit(),
     'convert-quai-to-qi': (c, a) => { if (a.length < 2) throw new Error('Usage: qi convert-quai-to-qi <from> <amount>'); return c.convertQuaiToQi(a[0], a[1]); },
