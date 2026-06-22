@@ -1366,33 +1366,64 @@ class Client {
   }
 
   async qiNextAddress() {
-    const address = this.addr;
-    
+    if (!this.qiWallet) {
+      throw new Error('QiHDWallet not initialized. Set QUAI_MNEMONIC env var for QI address derivation.');
+    }
+
     console.log(clr.cyan(`\n📍 Next QI address`));
-    console.log(`   Address: ${address}`);
-    console.log(clr.dim('   Note: Use the bot CLI for QI address derivation'));
-    
-    return { address };
+
+    // Derive next QI address from QiHDWallet
+    try {
+      const info = this.qiWallet.getNextAddress(0, 'cyprus1');
+      console.log(`   Address: ${info.address}`);
+      console.log(`   Zone: ${info.zone}`);
+      console.log(`   Path: ${info.derivationPath}`);
+      return info;
+    } catch (e) {
+      console.log(clr.red(`   ❌ Failed to derive address: ${e.message}`));
+      throw e;
+    }
   }
 
   async qiAddresses() {
-    const address = this.addr;
-    
+    if (!this.qiWallet) {
+      throw new Error('QiHDWallet not initialized. Set QUAI_MNEMONIC env var for QI address list.');
+    }
+
     console.log(clr.cyan(`\n📋 QI Addresses`));
-    console.log(`   Main address: ${address}`);
-    console.log(clr.dim('   Note: Use the bot CLI for full QI address list'));
-    
-    return { addresses: [address] };
+
+    // Get all QI addresses from QiHDWallet
+    try {
+      const addresses = this.qiWallet.getAddressesForZone('cyprus1');
+      console.log(`   Found ${addresses.length} addresses`);
+      
+      for (const addr of addresses) {
+        console.log(`   ${addr.address} (path: ${addr.derivationPath})`);
+      }
+      
+      return { addresses };
+    } catch (e) {
+      console.log(clr.red(`   ❌ Failed to get addresses: ${e.message}`));
+      throw e;
+    }
   }
 
   async qiPaymentCode() {
-    const address = this.addr;
-    
+    if (!this.qiWallet) {
+      throw new Error('QiHDWallet not initialized. Set QUAI_MNEMONIC env var for payment code.');
+    }
+
     console.log(clr.cyan(`\n💳 QI Payment Code`));
-    console.log(`   Payment code: ${address}`);
-    console.log(clr.dim('   Share this to receive QI'));
-    
-    return { paymentCode: address };
+
+    try {
+      const paymentCode = this.qiWallet.getPaymentCode(0);
+      console.log(`   Payment code: ${paymentCode}`);
+      console.log(clr.dim('   Share this to receive QI'));
+      return { paymentCode };
+    } catch (e) {
+      console.log(clr.red(`   ❌ Failed to get payment code: ${e.message}`));
+      throw e;
+    }
   }
 
   // ─── Wrapped QI (Deposit + Claim) ──────────────────────────────────────────
