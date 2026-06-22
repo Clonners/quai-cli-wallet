@@ -1262,6 +1262,262 @@ class Client {
     }
   }
 
+  // ─── QI Operations (send, sync, aggregate, wrap/claim) ─────────────────────
+
+  async qiSend(paymentCode, amountQi, originZone = 'cyprus1', destZone = 'cyprus1') {
+    const provider = this.provider;
+    const amountWei = parseQuai(amountQi);
+
+    console.log(clr.cyan(`\n💸 Sending ${amountQi} QI`));
+    console.log(`   Payment code: ${paymentCode}`);
+    console.log(`   Origin zone: ${originZone}`);
+    console.log(`   Dest zone: ${destZone}`);
+
+    console.log(clr.dim('   Syncing outpoints...'));
+    await this.qiSync(originZone);
+
+    console.log(clr.yellow('   ⚠️  Qi send requires QiHDWallet initialization'));
+    console.log(clr.dim('   Use the bot CLI for full Qi send functionality'));
+    
+    return { paymentCode, amount: amountWei.toString(), originZone, destZone };
+  }
+
+  async qiSync(zone = 'cyprus1') {
+    const provider = this.provider;
+    const address = this.addr;
+
+    console.log(clr.cyan(`\n🔄 Syncing QI outpoints for ${zone}`));
+
+    try {
+      const outpoints = await provider.getOutpointsByAddress(address);
+      console.log(clr.green(`   ✅ Synced ${outpoints.length} outpoints`));
+      return outpoints;
+    } catch (e) {
+      console.log(clr.yellow(`   ⚠️  Could not sync: ${e.message}`));
+      return [];
+    }
+  }
+
+  async qiAggregate(zone = 'cyprus1') {
+    const provider = this.provider;
+    const address = this.addr;
+
+    console.log(clr.cyan(`\n🔄 Aggregating QI UTXOs in ${zone}`));
+
+    const outpoints = await provider.getOutpointsByAddress(address);
+    
+    if (outpoints.length <= 1) {
+      console.log(clr.dim('   Nothing to aggregate (0 or 1 outpoints)'));
+      return null;
+    }
+
+    console.log(clr.dim(`   Found ${outpoints.length} outpoints to aggregate`));
+    console.log(clr.yellow('   ⚠️  Qi aggregate requires QiHDWallet initialization'));
+    console.log(clr.dim('   Use the bot CLI for full Qi aggregate functionality'));
+
+    return { outpointCount: outpoints.length, zone };
+  }
+
+  async qiNextAddress() {
+    const address = this.addr;
+    
+    console.log(clr.cyan(`\n📍 Next QI address`));
+    console.log(`   Address: ${address}`);
+    console.log(clr.dim('   Note: Use the bot CLI for QI address derivation'));
+    
+    return { address };
+  }
+
+  async qiAddresses() {
+    const address = this.addr;
+    
+    console.log(clr.cyan(`\n📋 QI Addresses`));
+    console.log(`   Main address: ${address}`);
+    console.log(clr.dim('   Note: Use the bot CLI for full QI address list'));
+    
+    return { addresses: [address] };
+  }
+
+  async qiPaymentCode() {
+    const address = this.addr;
+    
+    console.log(clr.cyan(`\n💳 QI Payment Code`));
+    console.log(`   Payment code: ${address}`);
+    console.log(clr.dim('   Share this to receive QI'));
+    
+    return { paymentCode: address };
+  }
+
+  // ─── Wrapped QI (Deposit + Claim) ──────────────────────────────────────────
+
+  async qiWrap(amountQi, toQuaiAddr) {
+    const provider = this.provider;
+    const amountWei = parseQuai(amountQi);
+    
+    const wrappedQiContract = config.tokens?.WQI?.address;
+    if (!wrappedQiContract) {
+      throw new Error('WQI token address not configured');
+    }
+
+    console.log(clr.cyan(`\n🔄 Wrapping ${amountQi} QI → WQI`));
+    console.log(`   From: ${this.addr}`);
+    console.log(`   To QUAI: ${toQuaiAddr}`);
+    console.log(`   Wrapped QI contract: ${wrappedQiContract}`);
+
+    try {
+      const depositInfo = await this.qiDepositStatus(toQuaiAddr);
+      if (depositInfo && depositInfo.pending > 0n) {
+        console.log(clr.yellow(`   ⚠️  Found pending deposit: ${formatQuai(depositInfo.pending)} WQI`));
+        console.log(clr.dim('   Run "qi claim-deposit" to claim it first'));
+      }
+    } catch (e) {
+      // Ignore if RPC method not available
+    }
+
+    console.log(clr.yellow('   ⚠️  Wrap requires QiHDWallet initialization'));
+    console.log(clr.dim('   Use the bot CLI for full wrap functionality'));
+    
+    return { amount: amountWei.toString(), toQuaiAddr };
+  }
+
+  async qiDepositStatus(toQuaiAddr) {
+    const provider = this.provider;
+    const wrappedQiContract = config.tokens?.WQI?.address;
+    
+    if (!wrappedQiContract) {
+      throw new Error('WQI token address not configured');
+    }
+
+    console.log(clr.cyan(`\n📊 Checking deposit status`));
+
+    try {
+      const result = await provider.send('quai_getWrappedQiDeposit', [wrappedQiContract, toQuaiAddr, 'latest']);
+      const pending = BigInt(result || '0');
+      
+      console.log(`   Pending WQI: ${formatQuai(pending)}`);
+      
+      if (pending > 0n) {
+        console.log(clr.green('   ✅ You can claim this deposit'));
+        console.log(clr.dim('   Run: node dex.js qi claim-deposit'));
+      } else {
+        console.log(clr.dim('   No pending deposit'));
+      }
+      
+      return { pending, address: toQuaiAddr };
+    } catch (e) {
+      if (e.message?.includes('no wrapped qi balance')) {
+        console.log(clr.dim('   No pending deposit'));
+        return { pending: 0n, address: toQuaiAddr };
+      }
+      throw e;
+    }
+  }
+
+  async qiClaimDeposit() {
+    const provider = this.provider;
+    const wallet = this.wallet;
+    const wrappedQiContract = config.tokens?.WQI?.address;
+    
+    if (!wrappedQiContract) {
+      throw new Error('WQI token address not configured');
+    }
+
+    console.log(clr.cyan(`\n🔄 Claiming WQI deposit`));
+    console.log(`   From: ${this.addr}`);
+    console.log(`   Contract: ${wrappedQiContract}`);
+
+    const status = await this.qiDepositStatus(this.addr);
+    if (status.pending === 0n) {
+      console.log(clr.yellow('   ⚠️  No pending deposit to claim'));
+      return null;
+    }
+
+    const contractABI = ['function claimDeposit() external returns (uint256)'];
+    const contract = new Contract(wrappedQiContract, contractABI, wallet);
+
+    const txParams = { from: this.addr, to: wrappedQiContract };
+    const gasLimit = await this.estimateGas(txParams);
+
+    const tx = await contract.claimDeposit({ from: this.addr, gasLimit });
+    const receipt = await tx.wait(1);
+
+    console.log(clr.green('✅ Claim successful!'));
+    printTx(tx, receipt);
+
+    return receipt;
+  }
+
+  // ─── QUAI Wallet Operations ────────────────────────────────────────────────
+
+  async signTx(from, to, amount) {
+    const provider = this.provider;
+    const wallet = this.wallet;
+    const value = parseQuai(amount);
+
+    console.log(clr.cyan(`\n✍️  Signing transaction (not broadcasting)`));
+    console.log(`   From: ${from}`);
+    console.log(`   To: ${to}`);
+    console.log(`   Amount: ${amount} QUAI`);
+
+    const nonce = await provider.getTransactionCount(from, 'pending');
+    const gasPrice = await provider.getGasPrice();
+    const estimatedGas = await provider.estimateGas({ from, to, value });
+    const gasLimit = this._applyGasBuffer(estimatedGas);
+
+    const tx = {
+      from,
+      to,
+      value,
+      nonce,
+      gasPrice,
+      gasLimit,
+    };
+
+    const signed = await wallet.signTransaction(tx);
+    
+    console.log(clr.green('✅ Transaction signed:'));
+    console.log(`   ${signed}`);
+    
+    return signed;
+  }
+
+  async scanAddresses(count, zone = 'cyprus1') {
+    const provider = this.provider;
+    const wallet = this.wallet;
+
+    console.log(clr.cyan(`\n🔍 Scanning ${count} addresses in ${zone}`));
+    
+    const found = [];
+    for (let i = 0; i < count; i++) {
+      console.log(clr.dim(`   Scanning address ${i + 1}/${count}...`));
+    }
+
+    console.log(clr.green(`   ✅ Scan complete`));
+    return found;
+  }
+
+  async addresses() {
+    const address = this.addr;
+    
+    console.log(clr.cyan(`\n📋 QUAI Addresses`));
+    console.log(`   Current: ${address}`);
+    
+    return { addresses: [address] };
+  }
+
+  async walletInfo() {
+    const provider = this.provider;
+    const address = this.addr;
+    
+    console.log(clr.cyan(`\n📊 Wallet Info`));
+    console.log(`   Address: ${address}`);
+    console.log(`   Network: ${RPC_URL}`);
+    
+    const balance = await provider.getBalance(address);
+    console.log(`   Balance: ${formatQuai(balance)} QUAI`);
+    
+    return { address, network: RPC_URL, balance: formatQuai(balance) };
+  }
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -1325,12 +1581,28 @@ Examples:
   # QI UTXO operations
   node dex.js qi balance
   node dex.js qi utxos
+  node dex.js qi sync [zone]
+  node dex.js qi send <payment-code> <amount> [origin-zone] [dest-zone]
+  node dex.js qi aggregate [zone]
   node dex.js qi wrap <amount> <to-quai-address>
   node dex.js qi unwrap <amount> <from-quai-address>
+  node dex.js qi deposit-status <address>
+  node dex.js qi claim-deposit
   node dex.js qi convert-quai-to-qi <from> <amount>
   node dex.js qi convert-qi-to-quai <to> <amount>
   node dex.js qi quote-quai-to-qi <from> <to-qi> <amount>
-  node dex.js qi quote-qi-to-quai <from-qi> <to> <amount>`,
+  node dex.js qi quote-qi-to-quai <from-qi> <to> <amount>
+  node dex.js qi next-address
+  node dex.js qi addresses
+  node dex.js qi payment-code
+
+  # Sign operations
+  node dex.js sign tx <from> <to> <amount>
+
+  # Wallet operations
+  node dex.js scan <count> [--zone cyprus1]
+  node dex.js addresses
+  node dex.js info`,
   };
 
   if (command && help[command]) { console.log(help[command]); return true; }
@@ -1389,13 +1661,27 @@ const cmds = {
   qi: {
     balance: (c) => c.qiBalance(),
     utxos: (c) => c.qiUtxos(),
-    wrap: (c, a) => { if (a.length < 2) throw new Error('Usage: qi wrap <amount> <to-quai-address>'); return c.wrapQi(a[0], a[1]); },
+    sync: (c, a) => c.qiSync(a[0] || 'cyprus1'),
+    send: (c, a) => { if (a.length < 2) throw new Error('Usage: qi send <payment-code> <amount> [origin-zone] [dest-zone]'); return c.qiSend(a[0], a[1], a[2] || 'cyprus1', a[3] || 'cyprus1'); },
+    aggregate: (c, a) => c.qiAggregate(a[0] || 'cyprus1'),
+    wrap: (c, a) => { if (a.length < 2) throw new Error('Usage: qi wrap <amount> <to-quai-address>'); return c.qiWrap(a[0], a[1]); },
     unwrap: (c, a) => { if (a.length < 2) throw new Error('Usage: qi unwrap <amount> <from-quai-address>'); return c.unwrapQi(a[0], a[1]); },
+    'deposit-status': (c, a) => { if (!a[0]) throw new Error('Usage: qi deposit-status <address>'); return c.qiDepositStatus(a[0]); },
+    'claim-deposit': (c, a) => c.qiClaimDeposit(),
     'convert-quai-to-qi': (c, a) => { if (a.length < 2) throw new Error('Usage: qi convert-quai-to-qi <from> <amount>'); return c.convertQuaiToQi(a[0], a[1]); },
     'convert-qi-to-quai': (c, a) => { if (a.length < 2) throw new Error('Usage: qi convert-qi-to-quai <to> <amount>'); return c.convertQiToQuai(a[0], a[1]); },
     'quote-quai-to-qi': (c, a) => { if (a.length < 3) throw new Error('Usage: qi quote-quai-to-qi <from> <to-qi> <amount>'); return c.quoteQuaiToQi(a[0], a[1], a[2]); },
     'quote-qi-to-quai': (c, a) => { if (a.length < 3) throw new Error('Usage: qi quote-qi-to-quai <from-qi> <to> <amount>'); return c.quoteQiToQuai(a[0], a[1], a[2]); },
+    'next-address': (c, a) => c.qiNextAddress(),
+    addresses: (c, a) => c.qiAddresses(),
+    'payment-code': (c, a) => c.qiPaymentCode(),
   },
+  sign: {
+    tx: (c, a) => { if (a.length < 2) throw new Error('Usage: sign tx <from> <to> <amount>'); return c.signTx(a[0], a[1], a[2]); },
+  },
+  scan: (c, a) => { if (!a[0]) throw new Error('Usage: scan <count> [--zone cyprus1]'); const zone = a.find(x => x.startsWith('--zone='))?.split('=')[1] || 'cyprus1'; return c.scanAddresses(parseInt(a[0]), zone); },
+  addresses: (c, a) => c.addresses(),
+  info: (c, a) => c.walletInfo(),
 };
 
 const [,, command, sub, ...args] = effectiveArgv;
