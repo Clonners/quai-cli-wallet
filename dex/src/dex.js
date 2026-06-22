@@ -1231,15 +1231,29 @@ class Client {
   }
 
   async convertQiToQuai(toAddr, amountQi) {
-    const provider = this.provider;
-    const amountWei = parseQuai(amountQi);
+    if (!this.qiWallet) {
+      throw new Error('QiHDWallet not initialized. Set QUAI_MNEMONIC env var for full QI support.');
+    }
+
+    const amountWei = parseQi(amountQi);
 
     console.log(clr.cyan(`\n💱 Converting ${amountQi} QI → QUAI`));
     console.log(`   To: ${toAddr}`);
-    console.log(clr.yellow('   ⚠️  Qi conversion requires QiHDWallet initialization'));
-    console.log(clr.dim('   Use the bot CLI for full Qi conversion functionality'));
 
-    return { toAddr, amount: amountWei.toString() };
+    // Sync outpoints first
+    console.log(clr.dim('   Syncing outpoints...'));
+    await this.qiSync('cyprus1');
+
+    // Convert QI to QUAI using QiHDWallet
+    try {
+      const tx = await this.qiWallet.convertToQuai(toAddr, amountWei);
+      console.log(clr.green('✅ Conversion successful!'));
+      console.log(`   TX: ${tx.hash}`);
+      return tx;
+    } catch (e) {
+      console.log(clr.red(`   ❌ Conversion failed: ${e.message}`));
+      throw e;
+    }
   }
 
   async quoteQuaiToQi(fromAddr, toQi, amountQuai) {
