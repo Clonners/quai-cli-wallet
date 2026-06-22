@@ -1417,8 +1417,12 @@ class Client {
 
     // Wrap QI using QiHDWallet (convert to QUAI with contract address as data)
     try {
-      const tx = await this.qiWallet.wrapQi(amountWei, toQuaiAddr);
-      console.log(clr.green('✅ Wrap successful!'));
+      // Build data payload: contract address as bytes
+      const contractAddrBytes = Buffer.from(wrappedQiContract.replace(/^0x/, ''), 'hex');
+      
+      // Convert QI to QUAI with contract address as data
+      const tx = await this.qiWallet.convertToQuai(toQuaiAddr, amountWei, { data: contractAddrBytes });
+      console.log(clr.green('✅ Wrap (deposit) successful!'));
       console.log(`   TX: ${tx.hash}`);
       
       // Note: After wrapping, you need to claim the deposit
