@@ -1447,6 +1447,70 @@ class Client {
     return receipt;
   }
 
+  // ─── QUAI → WQUAI (Wrap/Unwrap) ────────────────────────────────────────────
+
+  async wrapQuai(amountQuai) {
+    const provider = this.provider;
+    const wallet = this.wallet;
+    const wquaiContract = config.tokens?.WQUAI?.address;
+    
+    if (!wquaiContract) {
+      throw new Error('WQUAI token address not configured');
+    }
+
+    const value = parseQuai(amountQuai);
+
+    console.log(clr.cyan(`\n🔄 Wrapping ${amountQuai} QUAI → WQUAI`));
+    console.log(`   From: ${this.addr}`);
+    console.log(`   WQUAI contract: ${wquaiContract}`);
+
+    // Build deposit transaction
+    const contractABI = ['function deposit() payable'];
+    const contract = new Contract(wquaiContract, contractABI, wallet);
+
+    const txParams = { from: this.addr, to: wquaiContract };
+    const gasLimit = await this.estimateGas(txParams);
+
+    const tx = await contract.deposit({ from: this.addr, value, gasLimit });
+    const receipt = await tx.wait(1);
+
+    console.log(clr.green('✅ Wrap successful!'));
+    printTx(tx, receipt);
+
+    return receipt;
+  }
+
+  async unwrapWquai(amountWquai) {
+    const provider = this.provider;
+    const wallet = this.wallet;
+    const wquaiContract = config.tokens?.WQUAI?.address;
+    
+    if (!wquaiContract) {
+      throw new Error('WQUAI token address not configured');
+    }
+
+    const amountWei = parseQuai(amountWquai);
+
+    console.log(clr.cyan(`\n🔄 Unwrapping ${amountWquai} WQUAI → QUAI`));
+    console.log(`   From: ${this.addr}`);
+    console.log(`   WQUAI contract: ${wquaiContract}`);
+
+    // Build withdraw transaction
+    const contractABI = ['function withdraw(uint256)'];
+    const contract = new Contract(wquaiContract, contractABI, wallet);
+
+    const txParams = { from: this.addr, to: wquaiContract };
+    const gasLimit = await this.estimateGas(txParams);
+
+    const tx = await contract.withdraw(amountWei, { from: this.addr, gasLimit });
+    const receipt = await tx.wait(1);
+
+    console.log(clr.green('✅ Unwrap successful!'));
+    printTx(tx, receipt);
+
+    return receipt;
+  }
+
   // ─── QUAI Wallet Operations ────────────────────────────────────────────────
 
   async signTx(from, to, amount) {
@@ -1578,6 +1642,10 @@ Examples:
   # All balances
   node dex.js balances
 
+  # QUAI operations
+  node dex.js quai wrap <amount>    # QUAI → WQUAI
+  node dex.js quai unwrap <amount>  # WQUAI → QUAI
+
   # QI UTXO operations
   node dex.js qi balance
   node dex.js qi utxos
@@ -1658,6 +1726,10 @@ const cmds = {
     list: (c) => c.routerList(),
   },
   balances: (c) => c.allBalances(),
+  quai: {
+    wrap: (c, a) => { if (!a[0]) throw new Error('Usage: quai wrap <amount>'); return c.wrapQuai(a[0]); },
+    unwrap: (c, a) => { if (!a[0]) throw new Error('Usage: quai unwrap <amount>'); return c.unwrapWquai(a[0]); },
+  },
   qi: {
     balance: (c) => c.qiBalance(),
     utxos: (c) => c.qiUtxos(),
