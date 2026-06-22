@@ -12,7 +12,7 @@
  * Usage: node dex.js <command> [subcommand] [args]
  */
 
-import { Wallet, JsonRpcProvider, Contract, parseQuai, formatQuai, parseUnits, formatUnits } from 'quais';
+import { Wallet, JsonRpcProvider, Contract, parseQuai, formatQuai, parseUnits, formatUnits, QiHDWallet, Mnemonic, QuaiHDWallet, parseQi } from 'quais';
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -413,6 +413,7 @@ class Client {
     // usePathing: false for Orchard testnet (prime endpoint not available)
     this.provider = new JsonRpcProvider(RPC_URL, undefined, { usePathing: false });
     this.wallet = this._loadWallet();
+    this.qiWallet = this._loadQiWallet();
     this._networkInfo = null;
     this.gasBuffer = gasBuffer !== null ? gasBuffer : DEFAULT_GAS_BUFFER;
   }
@@ -421,6 +422,29 @@ class Client {
     const pk = process.env.QUAI_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY;
     if (!pk) throw new Error('QUAI_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY not found in environment.');
     return new Wallet(pk, this.provider);
+  }
+
+  _loadQiWallet() {
+    // Try to load mnemonic from env, otherwise generate from private key
+    const mnemonicPhrase = process.env.QUAI_MNEMONIC;
+    
+    if (mnemonicPhrase) {
+      // Load from mnemonic
+      try {
+        const mnemonic = Mnemonic.fromPhrase(mnemonicPhrase);
+        const qiWallet = QiHDWallet.fromMnemonic(mnemonic);
+        console.log(clr.dim('   ✅ QI wallet initialized from mnemonic'));
+        return qiWallet;
+      } catch (e) {
+        console.log(clr.yellow(`   ⚠️  Failed to load QI wallet from mnemonic: ${e.message}`));
+        console.log(clr.dim('   QI operations will be read-only'));
+      }
+    }
+    
+    // Fallback: try to derive from private key (limited functionality)
+    console.log(clr.dim('   ℹ️  No mnemonic provided (set QUAI_MNEMONIC env var for full QI support)'));
+    console.log(clr.dim('   QI operations will be read-only without mnemonic'));
+    return null;
   }
 
   get addr() { return this.wallet.address; }
@@ -1261,21 +1285,31 @@ class Client {
   // ─── QI Operations (send, sync, aggregate, wrap/claim) ─────────────────────
 
   async qiSend(paymentCode, amountQi, originZone = 'cyprus1', destZone = 'cyprus1') {
-    const provider = this.provider;
-    const amountWei = parseQuai(amountQi);
+    if (!this.qiWallet) {
+      throw new Error('QiHDWallet not initialized. Set QUAI_MNEMONIC env var for full QI support.');
+    }
+
+    const amountWei = parseQi(amountQi);
 
     console.log(clr.cyan(`\n💸 Sending ${amountQi} QI`));
     console.log(`   Payment code: ${paymentCode}`);
     console.log(`   Origin zone: ${originZone}`);
     console.log(`   Dest zone: ${destZone}`);
 
+    // Sync outpoints first
     console.log(clr.dim('   Syncing outpoints...'));
     await this.qiSync(originZone);
 
-    console.log(clr.yellow('   ⚠️  Qi send requires QiHDWallet initialization'));
-    console.log(clr.dim('   Use the bot CLI for full Qi send functionality'));
-    
-    return { paymentCode, amount: amountWei.toString(), originZone, destZone };
+    // Send QI transaction using QiHDWallet
+    try {
+      const tx = await this.qiWallet.sendTransaction(paymentCode, amountWei, originZone, destZone);
+      console.log(clr.green('✅ Send successful!'));
+      console.log(`   TX: ${tx.hash}`);
+      return tx;
+    } catch (e) {
+      console.log(clr.red(`   ❌ Send failed: ${e.message}`));
+      throw e;
+    }
   }
 
   async qiSync(zone = 'cyprus1') {
@@ -1295,23 +1329,26 @@ class Client {
   }
 
   async qiAggregate(zone = 'cyprus1') {
-    const provider = this.provider;
-    const address = this.addr;
+    if (!this.qiWallet) {
+      throw new Error('QiHDWallet not initialized. Set QUAI_MNEMONIC env var for full QI support.');
+    }
 
     console.log(clr.cyan(`\n🔄 Aggregating QI UTXOs in ${zone}`));
 
-    const outpoints = await provider.getOutpointsByAddress(address);
-    
-    if (outpoints.length <= 1) {
-      console.log(clr.dim('   Nothing to aggregate (0 or 1 outpoints)'));
-      return null;
+    // Sync outpoints first
+    console.log(clr.dim('   Syncing outpoints...'));
+    await this.qiSync(zone);
+
+    // Aggregate using QiHDWallet
+    try {
+      const tx = await this.qiWallet.aggregate(zone, {}, 6); // maxDenomAggregate = 6
+      console.log(clr.green('✅ Aggregate successful!'));
+      console.log(`   TX: ${tx.hash}`);
+      return tx;
+    } catch (e) {
+      console.log(clr.red(`   ❌ Aggregate failed: ${e.message}`));
+      throw e;
     }
-
-    console.log(clr.dim(`   Found ${outpoints.length} outpoints to aggregate`));
-    console.log(clr.yellow('   ⚠️  Qi aggregate requires QiHDWallet initialization'));
-    console.log(clr.dim('   Use the bot CLI for full Qi aggregate functionality'));
-
-    return { outpointCount: outpoints.length, zone };
   }
 
   async qiNextAddress() {
@@ -1347,8 +1384,11 @@ class Client {
   // ─── Wrapped QI (Deposit + Claim) ──────────────────────────────────────────
 
   async qiWrap(amountQi, toQuaiAddr) {
-    const provider = this.provider;
-    const amountWei = parseQuai(amountQi);
+    if (!this.qiWallet) {
+      throw new Error('QiHDWallet not initialized. Set QUAI_MNEMONIC env var for full QI support.');
+    }
+
+    const amountWei = parseQi(amountQi);
     
     const wrappedQiContract = config.tokens?.WQI?.address;
     if (!wrappedQiContract) {
@@ -1360,6 +1400,7 @@ class Client {
     console.log(`   To QUAI: ${toQuaiAddr}`);
     console.log(`   Wrapped QI contract: ${wrappedQiContract}`);
 
+    // Check for pending deposit first
     try {
       const depositInfo = await this.qiDepositStatus(toQuaiAddr);
       if (depositInfo && depositInfo.pending > 0n) {
@@ -1370,10 +1411,24 @@ class Client {
       // Ignore if RPC method not available
     }
 
-    console.log(clr.yellow('   ⚠️  Wrap requires QiHDWallet initialization'));
-    console.log(clr.dim('   Use the bot CLI for full wrap functionality'));
-    
-    return { amount: amountWei.toString(), toQuaiAddr };
+    // Sync outpoints first
+    console.log(clr.dim('   Syncing outpoints...'));
+    await this.qiSync('cyprus1');
+
+    // Wrap QI using QiHDWallet (convert to QUAI with contract address as data)
+    try {
+      const tx = await this.qiWallet.wrapQi(amountWei, toQuaiAddr);
+      console.log(clr.green('✅ Wrap successful!'));
+      console.log(`   TX: ${tx.hash}`);
+      
+      // Note: After wrapping, you need to claim the deposit
+      console.log(clr.dim('   Run "qi claim-deposit" to receive WQI'));
+      
+      return tx;
+    } catch (e) {
+      console.log(clr.red(`   ❌ Wrap failed: ${e.message}`));
+      throw e;
+    }
   }
 
   async qiDepositStatus(toQuaiAddr) {
